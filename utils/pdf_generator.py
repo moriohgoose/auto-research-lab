@@ -1,79 +1,153 @@
-import google.generativeai as genai
-import time
-import requests
 import re
-from typing import Optional, List, Dict
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER, TA_LEFT
-from reportlab.lib.units import inch, cm
-from reportlab.lib.colors import black
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 import logging
+from typing import List, Dict, Optional
+
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, ListFlowable, ListItem, KeepTogether
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT, TA_CENTER
+from reportlab.lib.units import inch, cm
 from reportlab.lib.pagesizes import A4
 
+# --- Hypothesis and plan generation ---
 
-def generate_text(prompt):
-    """
-    Generates text using the Gemini model. Includes basic retry logic.
-    """
-    logging.info(f"Sending prompt to Gemini ({len(prompt)} chars): {prompt[:150]}...")
-    max_retries = 2
-    attempt = 0
-    delay = 5
-
-    while attempt < max_retries:
-        attempt += 1
-        try:
-            model = genai.GenerativeModel('gemini-2.0-flash') 
-            response = model.generate_content(prompt)
-
-            response_text = None
-            try:
-                 response_text = response.text
-            except ValueError:
-                 try:
-                      if response.candidates:
-                           candidate = response.candidates[0]
-                           if candidate.content and candidate.content.parts:
-                                response_text = "".join(part.text for part in candidate.content.parts if hasattr(part, 'text'))
-                      else:
-                           logging.error(f"  Gemini response has no text and no candidates. Response: {response}")
-                 except (AttributeError, IndexError, Exception) as e_cand:
-                      logging.error(f"  Error accessing candidates: {e_cand}. Original response: {response}")
-
-            if response_text:
-                logging.info(f"  Gemini API response received ({len(response_text)} chars): {response_text[:150]}...")
-                return response_text
-            else:
-                 logging.warning(f"  Gemini API returned empty or blocked content (Attempt {attempt}/{max_retries}).")
-                 return None
-
-        except Exception as e:
-            logging.error(f"  Gemini API error (Attempt {attempt}/{max_retries}): {e}")
-            if attempt < max_retries:
-                logging.info(f"  Retrying in {delay} seconds...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                logging.error("  Max retries reached after API errors.")
-                return None
-    return None
-
+STYLES = getSampleStyleSheet()
+# Define custom styles based on existing ones
+TITLE_STYLE = ParagraphStyle(name='DocTitle', parent=STYLES['h1'], alignment=TA_LEFT, spaceAfter=14, fontSize=16)
+HEADING_STYLE = ParagraphStyle(name='SectionHeading', parent=STYLES['h2'], alignment=TA_LEFT, spaceBefore=12, spaceAfter=4, keepWithNext=1, fontSize=13)
+BODY_STYLE = ParagraphStyle(name='BodyText', parent=STYLES['Normal'], alignment=TA_JUSTIFY, spaceAfter=6, leading=14, firstLineIndent=0.2*cm) # Small indent for paragraphs
+LIST_ITEM_STYLE = ParagraphStyle(name='ListItem', parent=BODY_STYLE, leftIndent=1*cm, firstLineIndent=0) # Indent list items
 
 def markdown_to_reportlab(text: str) -> str:
-    """Converts basic Markdown (bold, italics) to ReportLab inline tags."""
+    """
+    Converts basic Markdown formatting (bold, italic, simple lists)
+    to ReportLab inline XML tags for Paragraph objects.
+
+    Args:
+        text (str): The input string potentially containing Markdown.
+
+    Returns:
+        str: The text with Markdown converted to ReportLab tags.
+             Returns an empty string if input is empty or None.
+    """
     if not text:
         return ""
-    # **bold** to <b>bold</b> 
-    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-    # *italic* to <i>italic</i> 
-    text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<b><i>\1</i></b>', text)
-    text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+
+    # Process bold/italic combinations first
+    text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<b><i>\1</i></b>', text) # ***bold+italic*** -> <b><i>bold+italic</i></b>
+    # Process bold
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text) # **bold** -> <b>bold</b>
+    # Process italic
+    text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text) # *italic* -> <i>italic</i>
+
+    # Replace newline characters with <br/> tags for line breaks within paragraphs
+    text = text.replace('\n', '<br/>\n')
+
     return text
 
+def save_hypothesis_pdf(response_text: str, filename: str = "agent_output.pdf", title: str = "Agent Generated Hypothesis and Research Plan") -> bool:
+    """
+    Saves the agent's final textual response into a formatted PDF file.
 
+    It attempts basic parsing of Markdown-like elements (bold, italic, headers, lists)
+    generated by the LLM to create a more readable document.
+
+    Args:
+        response_text (str): The complete final text output from the agent.
+        filename (str): The desired path and name for the output PDF file.
+        title (str): The main title for the PDF document.
+
+    Returns:
+        bool: True if the PDF was generated successfully, False otherwise.
+    """
+    
+    logging.info(f"Attempting to save agent response to PDF: {filename}")
+    if not response_text or not isinstance(response_text, str):
+        logging.error("Cannot save PDF: Input response_text is empty or not a string.")
+        return False
+
+    try:
+        # Setup the PDF document template
+        doc = SimpleDocTemplate(filename, pagesize=A4,
+                                leftMargin=1.8*cm, rightMargin=1.8*cm, 
+                                topMargin=2.0*cm, bottomMargin=2.0*cm)
+
+        story = [] # ReportLab flowables list
+
+        # Add document title
+        story.append(Paragraph(title, TITLE_STYLE))
+        story.append(Spacer(1, 0.5*cm))
+
+        # Basic parsing of the response text line by line
+        lines = response_text.strip().split('\n')
+        current_paragraph = "" # Accumulate lines for a paragraph
+        
+        for line_num, line in enumerate(lines):
+            stripped_line = line.strip()
+            logging.debug(f"Processing line {line_num+1}: '{stripped_line[:80]}...'")
+            
+            # Check for potential headings (e.g., **Heading:**)
+            heading_match = re.match(r'^\*\*(.+?):\*\*\s*$', stripped_line)
+            list_match = re.match(r"^\s*([\*\-\+•]|\d+\.?)\s+(.*)", stripped_line)
+
+            if heading_match:
+                # Add any preceding paragraph before the heading
+                if current_paragraph:
+                    processed_para = markdown_to_reportlab(current_paragraph.strip())
+                    story.append(Paragraph(processed_para, BODY_STYLE))
+                    logging.debug(f"Added paragraph ending before line {line_num+1}")
+                current_paragraph = "" # Headers reset list context
+                
+                # Add the heading
+                heading_text = heading_match.group(1).strip()
+                story.append(Paragraph(markdown_to_reportlab(f"**{heading_text}:**"), HEADING_STYLE))
+                story.append(Spacer(1, 1)) # Small space after heading
+                logging.debug(f"Added heading: {heading_text}")
+            
+            # Check for potential list items (*, -, 1., etc.)
+            elif list_match:
+                # Add any preceding paragraph before the list starts
+                if current_paragraph:
+                    processed_para = markdown_to_reportlab(current_paragraph.strip())
+                    story.append(Paragraph(processed_para, BODY_STYLE))
+                    logging.debug(f"Added paragraph ending before list item at line {line_num+1}")
+                current_paragraph = ""
+                list_text = list_match.group(2).strip()
+                story.append(Paragraph(f"<bullet>•</bullet> {markdown_to_reportlab(list_text)}", LIST_ITEM_STYLE))
+                logging.debug(f"Added list item: {list_text[:80]}...")
+            
+            # Check for empty lines (paragraph breaks)
+            elif not stripped_line:
+                # If there was content in the previous paragraph, add it to the story
+                if current_paragraph:
+                    processed_para = markdown_to_reportlab(current_paragraph.strip())
+                    story.append(Paragraph(processed_para, BODY_STYLE))
+                    logging.debug(f"Added paragraph due to empty line after line {line_num+1}")
+                current_paragraph = "" # Empty line usually breaks list context
+                # Add a small vertical space for paragraph separation, only if needed (styles have spaceAfter)
+
+            # Otherwise, treat as part of the current paragraph
+            else:
+                # If we just finished a list, start a new paragraph
+                current_paragraph += line + "\n"
+
+        # Add the last accumulated paragraph if any
+        if current_paragraph:
+            processed_para = markdown_to_reportlab(current_paragraph.strip())
+            story.append(Paragraph(processed_para, BODY_STYLE))
+            logging.debug("Added final accumulated paragraph.")
+
+        # Build the PDF document
+        logging.info("Building PDF story...") 
+        doc.build(story)
+        logging.info(f"PDF report '{filename}' generated successfully.")
+        return True
+
+    except Exception as e:
+        logging.error(f"CRITICAL Error generating PDF report '{filename}': {e}", exc_info=True)
+        return False
+    
+
+# --- Literature review generation ---
 def replace_ids_with_numbers(text: str, arxiv_ids_ordered: list, metadata: dict) -> str:
     """
     Replaces [ID: xxx], [ID: xxx, yyy], etc. citations in text with numbered citations [1], [1, 5], etc.
@@ -99,8 +173,10 @@ def replace_ids_with_numbers(text: str, arxiv_ids_ordered: list, metadata: dict)
 
 
     def get_citation_numbers(ids_string: str) -> Optional[str]:
-        """Takes the content inside [ID: ...], finds numbers, returns comma-separated citation numbers."""
-        # All IDs 
+        """
+        Takes the content inside [ID: ...], finds numbers, returns comma-separated citation numbers.
+        """
+
         extracted_id_nums = re.findall(r'([\d.]+v?\d*)', ids_string)
         if not extracted_id_nums:
             return None 
@@ -142,7 +218,7 @@ def replace_ids_with_numbers(text: str, arxiv_ids_ordered: list, metadata: dict)
     return processed_text
 
 
-def generate_pdf_report(title: Optional[str], abstract: Optional[str],
+def save_review_pdf(title: Optional[str], abstract: Optional[str],
                         review_sections: Dict[str, str],
                         references: List[str],
                         arxiv_ids_ordered: List[str],
@@ -244,8 +320,6 @@ def format_references_list(arxiv_ids: List[str], article_metadata: Dict[str, dic
         return formatted_refs
 
     logging.info(f"Formatting references for {len(arxiv_ids)} articles...")
-
-    id_to_number_map = {arxiv_id: i + 1 for i, arxiv_id in enumerate(arxiv_ids)} # for fast ID search
 
     for i, arxiv_id_key in enumerate(arxiv_ids):
         metadata = article_metadata.get(arxiv_id_key)

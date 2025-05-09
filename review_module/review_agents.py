@@ -3,19 +3,22 @@ import json
 import re
 import time
 import io
+import logging
+import requests
+import arxiv
 from datetime import datetime
 from typing import Optional, List, Dict
-import logging
+import google.generativeai as genai
 from pdfminer.converter import TextConverter
 from pdfminer.pdfinterp import PDFPageInterpreter, PDFResourceManager
 from pdfminer.layout import LAParams
 from pdfminer.pdfpage import PDFPage
-import requests
-import arxiv
-import google.generativeai as genai
-from utils import generate_text 
 
-RUN_OUTPUT_DIR = "review_runs"
+from utils.llm_clients import generate_text 
+from prompts import review_prompts as rp
+
+MODULE_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+RUN_OUTPUT_DIR = os.path.join(MODULE_ROOT_DIR, "pipeline_run_outputs")
 
 # --- ResearchAgent ---
 class ResearchAgent:
@@ -27,36 +30,6 @@ class ResearchAgent:
     Also generates title and abstract for the final review.
     """
 
-    system_prompt = """
-        You are an experienced researcher specializing in the in-depth analysis of scientific literature.
-        Your task is to conduct a literature review for a given research topic.
-        Pay close attention to the methodology used in the articles, and ensure your summaries include comprehensive details on each of the below:
-        - The **methods** they used to come to their conclusions. Be specific and include details about experimental or simulation procedures.
-        - The **resources** used to support the analysis, for example any special datasets used, equipment or computing power.
-        - A summary of each of the **steps** that were used in the paper's experiments to come to its conclusions.
-        """
-
-    rewrite_prompt_template = """
-        You are an expert researcher and scientific writer, tasked with **rewriting and significantly improving** a literature review based on the provided feedback.
-        Research Topic: {research_topic}
-        Specification: {specification_prompt}
-
-        **Critique and Recommendations:**
-        {critic_recommendations_and_weaknesses}
-
-        **Article Reviews (MUST be used for the rewrite):**
-        {article_reviews_content}
-
-        **Instructions:**
-        1.  **Thoroughly address ALL weaknesses and recommendations** from the critique.
-        2.  **Integrate insights** from the provided Article Reviews more deeply and effectively, especially regarding methods, resources, results, and limitations. Ensure diverse citation context.
-        3.  **Strengthen the analysis**, going beyond summaries to synthesize findings, identify patterns/contradictions, and evaluate methods critically.
-        4.  **Refine the proposed research pipeline** to be more concrete, detailed, and actionable, with clear steps, methods, resources, and success criteria, directly addressing the research topic and insights from the review.
-        5.  **Maintain the original strengths** identified in the review while making these improvements.
-        6.  **Ensure clarity, focus, and coherence** throughout the rewritten review.
-        7.  **Rewrite the ENTIRE literature review** incorporating all necessary changes. Do not just patch sections.
-        """
-
     def __init__(
         self,
         research_topic: str = "How to use LLMs for drug research",
@@ -64,6 +37,7 @@ class ResearchAgent:
         specification_prompt: Optional[str] = None,
         article_count_filter: int = 5,
         article_years_filter: Optional[str] = None,
+        gemini_model_name: str = "gemini-2.0-flash"
     ):
         """
         Initializes the ResearchAgent.
@@ -74,6 +48,8 @@ class ResearchAgent:
             specification_prompt: Optional prompt for specifying the research type or recommendations.
             article_count_filter: The number of articles to include in the final literature review (after ranking).
             article_years_filter: The number of years range to filter the article search by (e.g., "2020-2025"). None for no filter.
+            gemini_model_name: The name of the Gemini model to use (e.g., "gemini-2.0-flash").
+    
         """
         self.research_topic = research_topic
         self.keywords = keywords
@@ -88,21 +64,19 @@ class ResearchAgent:
         self.article_reviews = {} # Stores individual article reviews {arxiv_id: review_text}
         self.literature_review = None # Stores the final consolidated literature review text
         self.run_count = 0 # Counter for number of runs
-        self.content_type_used = "Article Reviews (from PDF text)"
+        self.gemini_model_name = gemini_model_name
 
-        logging.info(f"ResearchAgent initialized for topic: '{self.research_topic}'")
+        logging.info(f"ResearchAgent initialized for topic: {self.research_topic}")
 
     def generate_keywords(self):
         """
         Generates keywords for the research topic using the Gemini model if keywords are not provided.
         """
         if not self.keywords:
-            prompt = f"""Please suggest at least 4 keywords related to the research topic: {self.research_topic}.
-            Write ONLY keywords IN ONE LINE, separated by commas. Do not include any extra text.
-            Example: LLMs, drug discovery, AI, cheminformatics"""
+            prompt = rp.GENERATE_KEYWORDS_PROMPT_TEMPLATE.format(research_topic=self.research_topic)
             
             logging.info("Generating keywords...")
-            response = generate_text(prompt=prompt)
+            response = generate_text(prompt=prompt, model_name=self.gemini_model_name)
 
             if response:
                 self.keywords = [k.strip() for k in response.split(',') if k.strip()]
@@ -186,13 +160,10 @@ class ResearchAgent:
         logging.info(f"Ranking {len(self.article_metadata)} abstracts...")
         logging.debug(f"Metadata keys available for ranking: {list(self.article_metadata.keys())}")
 
-        prompt_lines = [
-            "You are an expert researcher. Rank the following abstracts based ONLY on their relevance to the research topic and specification provided below.",
-            f"Research Topic: {self.research_topic}",
-        ]
+        prompt_header = rp.RANK_ABSTRACTS_PROMPT_HEADER_TEMPLATE.format(research_topic=self.research_topic)
+        specification_line = ""
         if self.specification_prompt:
-            prompt_lines.append(f"Specification: {self.specification_prompt}")
-        prompt_lines.append("\nAbstracts to Rank (ID and Summary):")
+            specification_line = rp.RANK_ABSTRACTS_SPECIFICATION_LINE_TEMPLATE.format(specification_prompt=self.specification_prompt)
 
         abstract_texts_for_prompt = []
         for arxiv_id_key, metadata in self.article_metadata.items():
@@ -200,20 +171,13 @@ class ResearchAgent:
             truncated_abstract = abstract[:500] + "..." if len(abstract) > 500 else abstract
             abstract_texts_for_prompt.append(f"ID: {arxiv_id_key}\nAbstract: {truncated_abstract}\n---")
 
-        prompt_lines.append("\n".join(abstract_texts_for_prompt))
-        prompt_lines.append(
-            "\n**Instructions:**"
-            "\n1. Evaluate each abstract's relevance to the *specific* research topic and specification."
-            "\n2. Output ONLY a ranked list of the ArXiv IDs (full URL starting with http://arxiv.org/abs/), starting with the most relevant."
-            "\n3. List one ID per line."
-            "\n4. Do NOT include any other text, explanations, or scores."
-            "\nExample Output:\nhttp://arxiv.org/abs/2305.12345\nhttp://arxiv.org/abs/2401.67890\n..."
+        ranking_prompt = (
+            f"{prompt_header}{specification_line}"
+            f"{rp.RANK_ABSTRACTS_INSTRUCTIONS.format(abstract_list_for_prompt= '\n'.join(abstract_texts_for_prompt))}"
         )
-
-        ranking_prompt = "\n".join(prompt_lines)
         logging.debug(f"Ranking prompt (first 500 chars): {ranking_prompt[:500]}")
 
-        ranking_response = generate_text(prompt=ranking_prompt)
+        ranking_response = generate_text(prompt=ranking_prompt, model_name=self.gemini_model_name)
 
         self.ranked_arxiv_ids = [] # Reset ranked list
         if ranking_response:
@@ -235,7 +199,6 @@ class ResearchAgent:
                         if arxiv_id_key not in seen_ids:
                             valid_ranked_ids.append(arxiv_id_key)
                             seen_ids.add(arxiv_id_key)
-                        # else: logging.debug(f"Skipping duplicate ID from LLM: {arxiv_id_key}")
                     else:
                          # Log if the LLM returns an ID we didn't find initially
                          logging.warning(f"Ranked URL '{arxiv_id_key}' from LLM not found in initial metadata keys.")
@@ -408,53 +371,13 @@ class ResearchAgent:
                 continue # Skip to the next article
 
             # --- Prompt for individual article review ---
-            review_prompt = ("""
-                {self.system_prompt}
-                You are now focusing on reviewing a SINGLE research paper in extreme detail.
-                **Paper Context:**
-                - ArXiv ID: {arxiv_id}
-                - Research Topic Context: {self.research_topic}
-                - Specification Focus: {self.specification_prompt or 'General Relevance'}
-                
-                **Full Text:** 
-                ```{text_for_prompt}```
-                **Review Instructions (Follow Strictly):**
-                 Provide a structured review covering EACH of the following sections with the specified minimum detail. Be analytical and critical.
-                 
-                 1.  **Title and Core Contribution (minimum 6-10 sentences):**
-                     - State the paper's full title.
-                     - Concisely summarize the core problem, the proposed approach/method, and the main claim or finding as presented in the abstract and introduction.
-                 
-                 2.  **Detailed Methods (minimum 20-25 sentences):**
-                     - Describe the methodology in detail. What specific algorithms, experimental setups, simulation parameters, or theoretical frameworks were used?
-                     - Explain the key steps taken to implement the method and conduct the research.
-                     - Were there specific phases (e.g., data preprocessing, model training, evaluation)? Describe each.
-                 
-                 3.  **Resources and Datasets (minimum 20-25 sentences):**
-                     - Identify and describe all significant resources used. This includes datasets (source, size, characteristics), software libraries (versions if specified), specific hardware (e.g., GPUs), or any other crucial infrastructure.
-                     - Explain *why* these specific resources were chosen or necessary for the study.
-                 
-                 4.  **Key Results and Findings (minimum 20-25 sentences):**
-                     - Summarize the main results presented. Include quantitative findings (e.g., specific metric values, p-values, performance improvements) whenever available in the text.
-                     - What are the key conclusions drawn by the authors based on these results?
-                     - Did the results support the initial hypothesis or research question?
-                 
-                 5.  **Full Research Pipeline Summary (minimum 25-30 sentences):**
-                     - Synthesize the entire research process described in the paper, from the initial problem definition/question to the final conclusions.
-                     - Outline the sequence of key stages (e.g., data collection -> method development -> experimentation -> analysis -> conclusion).
-                     - How does each stage connect and contribute to the overall findings?
-                 
-                 6.  **Stated Limitations and Critical Assessment (minimum 20-25 sentences):**
-                     - What limitations, weaknesses, or future work directions did the *authors themselves* mention?
-                     - Does the paper compare its results to existing methods? Briefly summarize the comparison outcomes.
-                     - Based on your expert analysis of the provided text, are there any other potential limitations or critical points regarding the methodology, results interpretation, or scope?
-                     - What is the specific novel contribution of this paper in the context of existing work mentioned within the paper itself?
-                     - How relevant and novel do you assess this paper to be concerning the specific topic: '{self.research_topic}'? Justify briefly.
-                     - Are there indications of data/code availability for reproducibility?
-                 
-                 **Output Format:**
-                 Produce ONLY the structured review text. Do not add any introductory or concluding remarks outside of the specified sections.
-            """)
+            review_prompt = rp.SINGLE_ARTICLE_REVIEW_PROMPT_TEMPLATE.format(
+                system_prompt=rp.RESEARCH_AGENT_SYSTEM_PROMPT,
+                arxiv_id=arxiv_id,
+                research_topic=self.research_topic,
+                specification_prompt=self.specification_prompt or 'General Relevance',
+                text_for_prompt=text_for_prompt
+            )
 
             logging.info(f"  Sending prompt ({len(review_prompt)} chars) to Gemini for review of {arxiv_id}...")
             review_text = generate_text(prompt=review_prompt)
@@ -495,197 +418,68 @@ class ResearchAgent:
         article_reviews_text_for_prompt = []
         for arxiv_id_key, review in valid_reviews.items():
             arxiv_id_number = arxiv_id_key.split('/abs/')[-1]
+
             truncated_review = review[:2000] + "... (review truncated)" if len(review) > 2000 else review
             article_reviews_text_for_prompt.append(f"--- Article Review [ID: {arxiv_id_number}] ---\n{truncated_review}\n")
         article_reviews_full_prompt_text = "\n".join(article_reviews_text_for_prompt)
 
         # Base role and instructions for LLM
-        base_system_role = ("""
-                    You are an expert research synthesizer and scientific writer. Your task is to write sections of a **critically analytical, highly informative, and DETAILED** literature review on:
-                    **Research Topic:** {self.research_topic}
-                    **Specification:** {self.specification_prompt}
-                    You MUST base your writing **strictly** on the provided Article Reviews, identified by [ID: number] at the start of each review. Synthesize, compare, contrast, and critique the information **in depth**.
-                    **Citation Instruction:** When referencing findings or methods from a specific article review, cite it using ONLY the format `[ID: number]`, for example: `[ID: 2410.11550v1]`. Do NOT use full URLs or author names for citations within the text.
-                    **Formatting Instruction:** Do NOT include Markdown headings (like ## Introduction or **Introduction**) in your response text. **Do NOT use markdown tables.** Describe all information using prose sentences and paragraphs.
-                    **Detail Requirement:** Ensure each section provides **substantial detail, thorough analysis, and sufficient examples** drawn directly from the provided reviews to justify claims and comparisons. Avoid superficial summaries." 
-                """)
-
-        # Define sections, prompts, and dependencies
-        sections_to_generate = {
-            "introduction": {
-                "prompt_template": (
-                    "{system_role}\n\n"
-                    "{critic_instructions}"
-                    "**Task:** Write ONLY the **Introduction** section body text.\n\n"
-                    "**Instructions for Introduction (minimum 30-35 sentences):**\n"
-                    "- Briefly introduce the research topic '{research_topic}' and its significance.\n"
-                    "- State the specific scope or question this review addresses, guided by the specification '{specification_prompt}'.\n"
-                    "- Briefly mention the types of studies included (based on the reviews [ID: number]) and the overall goal of this review (e.g., synthesize methods, identify gaps).\n"
-                    "- Highlight the importance of this research area.\n\n"
-                    "**Article Reviews Provided:**\n{article_reviews}\n\n"
-                    "**Output:** Write ONLY the Introduction section body text (no heading)."
-                ),
-                "previous_section_keys": []
-            },
-            "key_themes": {
-                "prompt_template": (
-                    "{system_role}\n\n"
-                    "{critic_instructions}"
-                    "**Task:** Write ONLY the **Key Themes and Trends** section body text, building upon the (unseen) introduction.\n\n"
-                    "**Instructions for Key Themes and Trends (minimum 20-25 sentences):**\n"
-                    "- **Critically analyze and synthesize** the provided Article Reviews [ID: number].\n"
-                    "- Identify and discuss 2-4 major recurring themes, trends, or common approaches found across the papers.\n"
-                    "- For each theme, explain it clearly and provide specific supporting examples **directly** from the article reviews, citing using `[ID: number]` format.\n"
-                    "- Compare and contrast how different papers address these themes.\n"
-                    "- Discuss the significance or implications of these trends.\n\n"
-                    "- Identify and discuss any **emerging or less common (but potentially important) trends** observed in the reviewed articles.\n"
-                    "**Article Reviews Provided:**\n{article_reviews}\n\n"
-                    "**Output:** Write ONLY the Key Themes and Trends section body text (no heading)."
-                ),
-                "previous_section_keys": ["introduction"]
-            },
-            "methods_technologies": {
-                 "prompt_template": (
-                     "{system_role}\n\n"
-                     "{critic_instructions}"
-                     "**Task:** Write ONLY the **Methods and Technologies** section body text.\n\n"
-                     "**Previously Written Sections (Context Only):**\n{previous_sections}\n\n"
-                     "**Instructions for Methods and Technologies (minimum 30-35 sentences):**\n"
-                     "- **Critically analyze and compare** the different methods and technologies described in the Article Reviews [ID: number].\n"
-                     "- Group similar methods. Discuss the strengths and weaknesses of key approaches *as suggested by the reviews or your analysis of them*.\n"
-                     "- Provide specific details about prominent algorithms, techniques, or experimental procedures mentioned.\n"
-                     "- Analyze and compare the **evaluation metrics** used in the different studies [ID: number]. Are they consistent? Are they appropriate for the tasks? Discuss any limitations noted regarding evaluation.\n"
-                     "- Are there notable differences in methodology for similar problems? Discuss them.\n"
-                     "- Cite specific examples using `[ID: number]` format.\n\n"
-                     "**Article Reviews Provided:**\n{article_reviews}\n\n"
-                     "**Output:** Write ONLY the Methods and Technologies section body text (no heading)."
-                 ),
-                 "previous_section_keys": ["introduction", "key_themes"]
-            },
-            "resources_datasets": {
-                 "prompt_template": (
-                    "{system_role}\n\n"
-                    "{critic_instructions}"
-                    "**Task:** Write ONLY the **Resources and Datasets** section body text.\n\n"
-                    "**Previously Written Sections (Context Only):**\n{previous_sections}\n\n"
-                    "**Instructions for Resources and Datasets (minimum 20-25 sentences):**\n"
-                    "- **Synthesize** information about the datasets, software, hardware, or other resources mentioned in the Article Reviews [ID: number].\n"
-                    "- Identify commonly used resources or types of resources.\n"
-                    "- Discuss the characteristics of key datasets mentioned (e.g., size, type, source).\n"
-                    "- Are there mentions of resource limitations or the importance of specific resources? Include these insights.\n"
-                    "- Cite specific examples using `[ID: number]` format.\n\n"
-                    "**Article Reviews Provided:**\n{article_reviews}\n\n"
-                    "**Output:** Write ONLY the Resources and Datasets section body text (no heading)."
-                 ),
-                 "previous_section_keys": ["introduction", "key_themes", "methods_technologies"]
-            },
-            "challenges_limitations": {
-                 "prompt_template": (
-                     "{system_role}\n\n"
-                     "{critic_instructions}"
-                     "**Task:** Write ONLY the **Challenges and Limitations** section body text.\n\n"
-                     "**Previously Written Sections (Context Only):**\n{previous_sections}\n\n"
-                     "**Instructions for Challenges and Limitations (minimum 20-25 sentences):**\n"
-                     "- **Synthesize** the challenges, limitations, and weaknesses identified **within the provided Article Reviews** [ID: number] (both self-reported by authors and noted in the review itself).\n"
-                     "- **Categorize** the identified challenges (e.g., data-related, methodological, computational, ethical).\n"
-                     "- Discuss the **potential impact** of each major challenge category on the field's progress.\n"
-                     "- Are there specific **mitigation strategies** proposed or implied in the reviewed papers for these challenges? Discuss them.\n"
-                     "- What are the recurring obstacles or gaps mentioned across the papers?\n"
-                     "- Discuss the implications of these limitations for the field and for the research topic '{research_topic}'.\n"
-                     "- Cite specific examples using `[ID: number]` format.\n\n"
-                     "**Article Reviews Provided:**\n{article_reviews}\n\n"
-                     "**Output:** Write ONLY the Challenges and Limitations section body text (no heading)."
-                 ),
-                 "previous_section_keys": ["introduction", "key_themes", "methods_technologies", "resources_datasets"]
-             },
-             "proposed_pipeline": {
-                 "prompt_template": (
-                     "{system_role}\n\n"
-                     "{critic_instructions}"
-                     "**Task:** Write ONLY the **Proposed Research Pipeline** section body text.\n\n"
-                     "**Previously Written Sections (Context Only):**\n{previous_sections}\n\n"
-                     "**Instructions for Proposed Research Pipeline (minimum 30-35 sentences):**\n"
-                     "1.  **Introduction Paragraph(s):** Begin with 1-2 paragraphs outlining the overall goal and core principles of the proposed pipeline. Explain *why* this pipeline structure is proposed, based **strictly** on the analysis of the provided Article Reviews (methods, resources, challenges synthesized in previous sections). Briefly mention the key limitations it aims to address.\n\n"
-                     "2.  **Pipeline Stages (Describe each stage in a separate paragraph, clearly numbering or naming them, e.g., 'Stage 1: Data Curation', 'Stage 2: Model Adaptation', etc.):**\n"
-                     "    *   Propose **5-7 distinct, sequential stages** for a comprehensive research pipeline addressing the topic '{research_topic}'.\n"
-                     "    *   For **EACH stage**: \n"
-                     "        *   Clearly state the **purpose** of the stage.\n"
-                     "        *   Suggest **specific, named methods, tools, or dataset types** inspired by the reviewed papers [ID: number].\n"
-                     "        *   Briefly **justify** the choice of these components for this stage, linking back to the synthesized knowledge (e.g., 'Inspired by the RAG approach in [ID: X], this stage will...').\n"
-                     "        *   Mention potential **evaluation metrics or intermediate validation points** for this stage.\n\n"
-                     "3.  **Challenges and Mitigation Paragraph(s):** After describing the stages, dedicate 1-2 paragraphs to discuss the **potential challenges** specifically for *this proposed pipeline* (e.g., data integration, computational cost, validation hurdles) and suggest **concrete mitigation strategies**, referencing insights from the reviews [ID: number] where applicable.\n\n"
-                     "4.  **Concluding Summary Paragraph:** End with a brief paragraph summarizing the expected outcomes and significance of implementing this proposed pipeline for advancing research on '{research_topic}'.\n\n"
-                     "**Article Reviews Provided:**\n{article_reviews}\n\n"
-                     "**Output:** Write ONLY the Proposed Research Pipeline section body text, following the 4-part structure described above (Intro, Stages, Challenges, Conclusion). Use clear paragraph breaks between parts and between stages."
-                 ),
-                 "previous_section_keys": ["introduction", "key_themes", "methods_technologies", "resources_datasets", "challenges_limitations"]
-             },
-             "conclusion": {
-                 "prompt_template": (
-                     "{system_role}\n\n"
-                     "{critic_instructions}"
-                     "**Task:** Write ONLY the **Conclusion** section body text.\n\n"
-                     "**Previously Written Sections (Context Only):**\n{previous_sections}\n\n"
-                     "**Instructions for Conclusion (minimum 25-30 sentences):**\n"
-                     "- Briefly summarize the key themes, dominant methods, and major challenges identified in the review.\n"
-                     "- Provide an overall critical assessment of the state of research on '{research_topic}' based **only** on the reviewed articles.\n"
-                     "- Reiterate the main insights regarding effective research approaches or pipelines derived from the synthesis.\n"
-                     "- Briefly suggest the most promising directions for future research **emerging directly from the analysis of the reviewed papers and the proposed pipeline**.\n"
-                     "- Conclude with the potential impact or significance of advancing research in this area.\n"
-                     "- Cite key supporting points using `[ID: number]` format.\n\n"
-                     "**Article Reviews Provided:**\n{article_reviews}\n\n"
-                     "**Output:** Write ONLY the Conclusion section body text (no heading)."
-                 ),
-                 "previous_section_keys": ["introduction", "key_themes", "methods_technologies", "resources_datasets", "challenges_limitations", "proposed_pipeline"]
-            }
-        }
+        base_system_role = rp.LIT_REVIEW_SECTION_BASE_SYSTEM_ROLE_TEMPLATE.format(
+            research_topic=self.research_topic,
+            specification_prompt=self.specification_prompt or "General overview"
+        )
 
         # Prepare critic feedback prompt part
         critic_instructions_prompt = ""
         if critic_feedback:
-             logging.info("  Generating sections in rewrite mode based on critic feedback.")
-             critic_instructions_prompt = (
-                 "**CRITICAL REWRITE INSTRUCTIONS:**\nYou MUST rewrite the sections based on the following critique. Focus on addressing all weaknesses and recommendations:\n"
-                 f"{critic_feedback}\n"
-                 "Ensure the rewritten sections are significantly improved and integrate insights from the Article Reviews more effectively.\n---\n"
-             )
+            logging.info("  Generating sections in rewrite mode based on critic feedback.")
+            critic_instructions_prompt = rp.CRITICAL_REWRITE_INSTRUCTIONS_TEMPLATE.format(
+                critic_feedback=critic_feedback
+            )
 
         successful_sections_count = 0
         
         # Generate sections sequentially
-        for section_key, config in sections_to_generate.items():
+        for section_key, section_config in rp.LIT_REVIEW_SECTIONS_CONFIG.items():
             logging.info(f"  Generating section: {section_key}...")
-            previous_sections_text = "\n\n".join(
-                [f"--- Context from {prev_key} ---:\n{self.review_sections.get(prev_key, 'Not generated yet.')[:500]}..." # Send only snippet of previous for context
-                 for prev_key in config["previous_section_keys"]]
-            )
 
-            prompt = config["prompt_template"].format(
+            template_str = section_config["template"]
+            prev_keys = section_config["previous_section_keys"] 
+
+            previous_sections_text = []
+            if prev_keys: 
+                for prev_key in prev_keys:
+                    content = self.review_sections.get(prev_key, 'Not generated yet or generation failed.')
+                    previous_sections_text.append(f"--- Context from previously generated section '{prev_key}' (excerpt) ---\n{content[:500]}...\n--- End of context for '{prev_key}' ---")
+            
+            previous_sections_for_prompt = "\n\n".join(previous_sections_text) if previous_sections_text else "This is the first section being generated."
+            
+            prompt = template_str.format(
                 system_role=base_system_role,
-                research_topic=self.research_topic,
-                specification_prompt=self.specification_prompt or "General overview",
+                research_topic=self.research_topic, 
+                specification_prompt=self.specification_prompt or "General overview", 
                 article_reviews=article_reviews_full_prompt_text,
-                previous_sections=previous_sections_text or "This is the first section.",
-                critic_instructions=critic_instructions_prompt
+                previous_sections=previous_sections_for_prompt, 
+                critic_instructions=critic_instructions_prompt 
             )
-
-            section_content = generate_text(prompt=prompt)
+            section_content = generate_text(prompt=prompt, model_name=self.gemini_model_name)
             
             if section_content:
-                # Remove potential leading/trailing markdown, extra spaces
-                section_content = re.sub(r"^\s*#+\s*.*\s*", "", section_content).strip() # Remove leading # headings
-                section_content = re.sub(r"^\s*\*\*+\s*.*\s*\*\*+\s*", "", section_content).strip() # Remove leading ** headings
+                section_content = re.sub(r"^\s*#+\s*.*\s*", "", section_content).strip()
+                section_content = re.sub(r"^\s*\*\*+\s*.*\s*\*\*+\s*", "", section_content).strip()
                 self.review_sections[section_key] = section_content
                 successful_sections_count += 1
                 logging.info(f"    Successfully generated section: {section_key}")
             else:
                 self.review_sections[section_key] = f"Error: Failed to generate section '{section_key}'."
                 logging.error(f"    Error generating section: {section_key}")
-
-        logging.info(f"Finished generating review sections. Successfully generated {successful_sections_count}/{len(sections_to_generate)} sections.")
-        if successful_sections_count < len(sections_to_generate):
+        
+        total_sections_to_generate = len(rp.LIT_REVIEW_SECTIONS_CONFIG)
+        logging.info(f"Finished generating review sections. Successfully generated {successful_sections_count}/{total_sections_to_generate} sections.")
+        if successful_sections_count < total_sections_to_generate:
              failed_sections = [key for key, content in self.review_sections.items() if content.startswith("Error:")]
              logging.warning(f"  Failed to generate sections: {failed_sections}")
+
 
     def consolidate_reviews(self):
         """
@@ -738,28 +532,9 @@ class ResearchAgent:
              truncated_review = review_text[:max_len] + "\n... (review text truncated for title/abstract prompt)"
              logging.warning(f"  Review text truncated to {max_len} chars for title/abstract generation.")
 
-        prompt = f"""
-                Based on the following literature review text, please generate:
-                1. A concise and informative Title (max 15 words).
-                2. A comprehensive Abstract summarizing the key findings, methods, challenges, and conclusions (150-250 words).
-
-                Literature Review Text:
-                {truncated_review}
-
-                Output Format:
-                Provide the Title first, followed by the Abstract on separate lines. Start the lines exactly with "Title:" and "Abstract:". 
-                Ensure the abstract is a single paragraph.
-
-                Example:
-                Title: Applications of LLMs in Accelerating Drug Discovery
-                Abstract: This review synthesizes recent advancements in leveraging Large Language Models (LLMs) for drug discovery. Key themes identified include the development of domain-specific models and multi-modal approaches. Common methods involve fine-tuning pre-trained LLMs and integrating knowledge graphs. Significant challenges remain, such as data scarcity, model interpretability, and ethical considerations. The review concludes by highlighting the potential of LLMs while proposing a research pipeline focused on improved benchmarking and explainability to further advance the field.
-
-                Your Turn:
-                Title:
-                Abstract:
-                """
+        prompt = rp.TITLE_ABSTRACT_PROMPT_TEMPLATE.format(truncated_review=truncated_review)
         
-        response = generate_text(prompt)
+        response = generate_text(prompt, model_name=self.gemini_model_name)
         if not response:
             logging.error("  Error: Failed to get response from Gemini for title/abstract.")
             return None, None
@@ -849,41 +624,65 @@ class ResearchAgent:
 
         # 4. Extract text from PDFs
         pdf_dir = "downloaded_pdfs"
-        self.pdf_texts.clear()
 
-        logging.info("Extracting text from relevant PDFs...")
-
-        extracted_texts_count = 0
+        logging.info("Checking cache and extracting text from relevant PDFs if needed...")
+        extracted_newly_count = 0
+        cache_hits_count = 0
         missing_pdf_count = 0
+        failed_extraction_count = 0
+
+        current_run_pdf_texts = {}
 
         for arxiv_id_key in self.relevant_arxiv_ids:
+
+            # --- Caching logic ---
+            cached_data = self.pdf_texts.get(arxiv_id_key)
+            # Check if valid text is already in cache
+            if cached_data and not cached_data.startswith("Error:"):
+                logging.debug(f"Cache hit for {arxiv_id_key}.")
+                current_run_pdf_texts[arxiv_id_key] = cached_data
+                cache_hits_count += 1
+                continue # to the next ID
+
+            # --- If not in cache or cache contains an error - attempt extraction ---
+            logging.debug(f"Cache miss or error for {arxiv_id_key}. Attempting extraction...")
+
             safe_filename_id = re.sub(r'[/:.]', '_', arxiv_id_key)
             pdf_filename = os.path.join(pdf_dir, f"{safe_filename_id}.pdf")
             
             if os.path.exists(pdf_filename):
                 full_text = self.extract_full_text_from_pdf(pdf_filename)
-                self.pdf_texts[arxiv_id_key] = full_text if full_text else "Error: PDF text extraction failed."
-                if full_text: extracted_texts_count += 1
+                if full_text:
+                    logging.debug(f"Successfully extracted text for {arxiv_id_key}, adding to cache.")
+                    self.pdf_texts[arxiv_id_key] = full_text # <<< save to cache >>>
+                    current_run_pdf_texts[arxiv_id_key] = full_text
+                    extracted_newly_count += 1
             
+                else:
+                    # Extraction error
+                    logging.warning(f"Text extraction failed for {pdf_filename}.")
+                    self.pdf_texts[arxiv_id_key] = "Error: PDF text extraction failed." # save error to cache
+                    current_run_pdf_texts[arxiv_id_key] = "Error: PDF text extraction failed."
+                    failed_extraction_count += 1
             else:
-                 logging.warning(f"PDF file not found for {arxiv_id_key} at {pdf_filename}. Cannot extract text.")
-                 self.pdf_texts[arxiv_id_key] = "Error: PDF file not found."
-                 missing_pdf_count += 1
+                 # PDF not find
+                logging.warning(f"PDF file not found for {arxiv_id_key} at {pdf_filename}. Cannot extract text.")
+                self.pdf_texts[arxiv_id_key] = "Error: PDF file not found."
+                missing_pdf_count += 1
 
-        if extracted_texts_count == 0 and self.relevant_arxiv_ids:
-             logging.error("Error: Could not extract text from ANY relevant PDF. Cannot proceed.")
-             return None
+        logging.info(f"Text extraction complete. Cache hits: {cache_hits_count}, Newly extracted: {extracted_newly_count}, Missing PDFs: {missing_pdf_count}, Failed extractions: {failed_extraction_count}.")                
+
+        # Check after extraction
+        valid_texts_count = sum(1 for txt in current_run_pdf_texts.values() if txt and not txt.startswith("Error:"))
+        if valid_texts_count == 0 and self.relevant_arxiv_ids:
+             logging.error("Error: Could not extract or retrieve from cache any valid text for relevant PDFs. Cannot proceed.")
+             return None        
         
-        if missing_pdf_count > 0:
-             logging.warning(f"Could not find PDF files for {missing_pdf_count}/{len(self.relevant_arxiv_ids)} articles.")
-
-        if extracted_texts_count < len(self.relevant_arxiv_ids) - missing_pdf_count:
-             logging.warning(f"Successfully extracted text from only {extracted_texts_count} out of {len(self.relevant_arxiv_ids) - missing_pdf_count} PDFs found.")
-
         # 5. Generate Article Reviews
-        self.article_reviews = self.generate_article_reviews(self.pdf_texts)
+        logging.info("Generating article reviews...")
+
+        self.article_reviews = self.generate_article_reviews(current_run_pdf_texts)
         successful_reviews = sum(1 for review in self.article_reviews.values() if not review.startswith("Error:"))
-        
         if successful_reviews == 0 and self.relevant_arxiv_ids:
             logging.error("Error: Failed to generate any usable article reviews. Cannot proceed.")
             return None
@@ -934,12 +733,13 @@ class ReviewCriticAgent:
     provides scores based on defined criteria, and suggests improvements.
     """
 
-    def __init__(self, literature_review_json_path: str):
+    def __init__(self, literature_review_json_path: str, gemini_model_name: str = "gemini-2.0-flash"):
         """
         Initializes the ReviewCriticAgent.
 
         Args:
             literature_review_json_path: Path to the intermediate literature review JSON file for the current run.
+            gemini_model_name: The name of the Gemini model to use (e.g., "gemini-2.0-flash").
         """
         self.literature_review_json_path = literature_review_json_path
         try:
@@ -949,6 +749,8 @@ class ReviewCriticAgent:
             raise FileNotFoundError(f"Error: Literature review file not found: {literature_review_json_path}")
         except json.JSONDecodeError as e:
             raise json.JSONDecodeError(f"Error decoding JSON in file {literature_review_json_path}: {e.msg}", e.doc, e.pos) from e
+
+        self.gemini_model_name = gemini_model_name
 
         # Extract relevant data, providing defaults
         self.literature_review_text = self.literature_review_data.get("literature_review", "")
@@ -977,133 +779,13 @@ class ReviewCriticAgent:
         if len(literature_review_text_for_prompt) > max_len:
              literature_review_text_for_prompt = literature_review_text_for_prompt[:max_len] + "... (literature review text truncated)"
 
-
-        prompt = f"""You are a highly experienced and critical academic reviewer specializing in literature reviews.
-                    Your task is to evaluate the following literature review (run {self.run_count}) and provide constructive feedback for improvement, following the structured JSON format requested.
-                    The review focuses on:
-                    Research Topic: "{self.research_topic}"
-                    Specification: "{self.specification_prompt}"
-
-                    **Literature Review Text to Evaluate:** {literature_review_text_for_prompt}
-                    **Article Reviews Used to Generate This Literature Review (potentially truncated):** {article_reviews_json_string}
-                    Evaluation Criteria & JSON Output Structure:
-
-                    Evaluate the literature review based on the following criteria. For each criterion:
-
-                        Provide a concise "Assessment" explaining your reasoning with specific examples from the review text.
-
-                        Assign a "Score" from 1 (Very Poor) to 5 (Excellent).
-
-                    Output your entire response as a SINGLE, VALID JSON object. Do NOT include ANY text outside this JSON object.
-
-                    JSON Structure:
-                    {{
-                    "scores": {{
-                    "clarity_and_focus": {{
-                    "assessment": "Your assessment text here...",
-                    "score": <INT 1-5>
-                    }},
-                    "depth_of_analysis": {{
-                    "assessment": "Your assessment text here... Does it synthesize, compare, contrast, critique? Or just summarize?",
-                    "score": <INT 1-5>
-                    }},
-                    "coverage_of_individual_article_reviews": {{
-                    "assessment": "Your assessment text here... Are key methods, results, limitations from the provided article reviews reflected accurately and sufficiently? Estimate coverage %.",
-                    "score": <INT 1-5>
-                    }},
-                    "diversity_of_citation_context": {{
-                    "assessment": "Your assessment text here... Are articles cited across different sections (Intro, Methods, Challenges, Conclusion) to support various points, or confined to one section?",
-                    "score": <INT 1-5>
-                    }},
-                    "proposed_research_pipeline_evaluation": {{
-                    "assessment": "Your assessment text here... How concrete, actionable, and well-justified is the proposed pipeline? Does it address the topic/gaps? Are steps/methods/metrics clear?",
-                    "score": <INT 1-5>
-                    }}
-                    // Note: Removed "citation_quality" as it's hard to judge format from text alone and covered by other criteria.
-                    }},
-                    "strengths": [
-                    "List the main strengths concisely.",
-                    "Example: Good synthesis of methods in section X.",
-                    "..."
-                    ],
-                    "weaknesses": [
-                    "List the main weaknesses concisely.",
-                    "Example: Proposed pipeline lacks specific metrics.",
-                    "Example: Analysis doesn't sufficiently compare approaches from paper A and B.",
-                    "..."
-                    ],
-                    "recommendations": [
-                    "Provide specific, actionable recommendations for improvement.",
-                    "Example: 'In the pipeline section, define specific target metrics for evaluating method X.'",
-                    "Example: 'Expand the 'Methods' section to explicitly compare the algorithms used in ArXiv:1234 and ArXiv:5678.'",
-                    "..."
-                    ]
-                    }}
-
-                    Detailed Criteria Levels (for your reference during evaluation):
-
-                        Clarity and Focus (1-5):
-
-                            5: Excellent clarity, sharp focus on topic/specification, strong central argument woven throughout.
-
-                            4: Good clarity and focus, mostly consistent, clear purpose.
-
-                            3: Generally clear, but some minor deviations or weaker focus.
-
-                            2: Struggles with clarity/focus, inconsistent, weak argument.
-
-                            1: Lacks clarity/focus, deviates significantly, no clear argument.
-
-                        Depth of Analysis (1-5):
-
-                            5: Highly insightful, goes beyond summary, synthesizes, critiques, identifies nuances, offers original perspectives.
-
-                            4: Good analysis, identifies patterns/trends/gaps, synthesizes well.
-
-                            3: Some analysis, identifies basic patterns, but somewhat superficial.
-
-                            2: Minimal analysis, mostly summary with limited connections.
-
-                            1: No real analysis, just lists findings.
-
-                        Coverage of Individual Article Reviews (1-5): (Based on the provided article review texts)
-
-                            5: Comprehensive integration (>80%) of key findings, methods, limitations from article reviews; accurate reflection.
-
-                            4: Good coverage (60-80%), most key aspects included.
-
-                            3: Moderate coverage (40-60%), some important details missed.
-
-                            2: Minimal coverage (20-40%), many key aspects ignored.
-
-                            1: Almost no coverage (<20%), ignores/misrepresents article reviews.
-
-                        Diversity of Citation Context (1-5):
-
-                            5: Key articles strategically cited/discussed in 4-5+ different sections, enriching multiple facets.
-
-                            4: Most articles cited in 3+ different sections, showing good integration.
-
-                            3: Mix of citation contexts, but some key articles confined to 1-2 sections.
-
-                            2: Most articles cited in only 1-2 sections, superficial integration.
-
-                            1: Articles almost exclusively cited in one section, lack of integration.
-
-                        Proposed Research Pipeline Evaluation (1-5):
-
-                            5: Exceptionally well-defined, actionable, specific methods/tools/datasets/metrics for every step, directly addresses gaps.
-
-                            4: Well-defined pipeline, most steps have specifics, but some minor details lacking.
-
-                            3: Some concrete steps, but lacks detail or clear success criteria in many areas.
-
-                            2: Poorly defined, lacks essential details (methods, data, criteria).
-
-                            1: No pipeline proposed, or completely abstract/vague.
-
-                    Ensure your final output is ONLY the JSON object.
-                    """
+        prompt = rp.CRITIC_REVIEW_PROMPT_TEMPLATE.format(
+            run_count=self.run_count,
+            research_topic=self.research_topic,
+            specification_prompt=self.specification_prompt,
+            literature_review_text_for_prompt=literature_review_text_for_prompt,
+            article_reviews_json_string=article_reviews_json_string
+        )
         return prompt
     
 
@@ -1135,7 +817,7 @@ class ReviewCriticAgent:
                 prompt = self.generate_review_prompt()
 
                 # 2. Get the response from the Gemini model
-                response = generate_text(prompt=prompt)
+                response = generate_text(prompt=prompt, model_name=self.gemini_model_name)
 
                 if not response:
                     logging.error(f"  Error: Received empty response from LLM (attempt {attempt_num}).")
