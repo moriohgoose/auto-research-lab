@@ -87,7 +87,7 @@ class ToolManager:
             if hasattr(tool, 'tool_call_name') and hasattr(tool, 'tool_is_used') and tool.tool_is_used(agent_query):
                 tool_found = True
                 selected_tool = tool
-                logging.info(f"Tool identified: {selected_tool.tool_name} (Call name: {selected_tool.tool_call_name})")
+                logging.info(f"Tool identified: {selected_tool.tool_call_name} (Call name: {selected_tool.tool_call_name})")
                 break # Stop searching once a tool is found
 
         if not tool_found or selected_tool is None:

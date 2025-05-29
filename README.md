@@ -1,55 +1,68 @@
-# Auto Research Lab
+# Auto Research Lab: Literature Review & Hypothesis Generation
 
 ## 1. Overview
 
-This project implements an automated pipeline for generating and iteratively refining academic literature reviews. Given a research topic, optional keywords, and other parameters, the system leverages Large Language Models (specifically Google's Gemini via `google-generativeai`) and the `arxiv` library to:
+This project provides an AI-powered pipeline utilizing Large Language Models (LLMs) to assist researchers in two key areas:
 
-1.  **Discover:** Find relevant research papers on arXiv.
-2.  **Analyze:** Download papers, extract text, and generate detailed summaries (reviews) for each selected paper using an LLM.
-3.  **Synthesize:** Combine the individual paper reviews into a coherent, structured literature review draft covering key themes, methods, datasets, challenges, and conclusions, using an LLM.
-4.  **Critique:** Evaluate the synthesized review draft using an LLM based on predefined criteria (clarity, depth, coverage, etc.).
-5.  **Refine:** Based on the critique scores and feedback, decide whether the review meets quality standards, requires further refinement (triggering another LLM rewrite based on feedback), or needs a complete restart (if quality degrades significantly). This iterative process continues until stopping criteria are met or a maximum number of iterations is reached.
-6.  **Format:** Generate a final report including a title, abstract (both AI-generated), the main review body (with numbered in-text citations), and a formatted reference list in both JSON and user-friendly PDF formats using `reportlab`.
+1.  **Automated Literature Review Generation:** Discovers relevant academic papers (currently via arXiv), analyzes their content, synthesizes findings into a structured review, and iteratively refines the draft based on AI critique.
+2.  **Hypothesis & Research Plan Generation:** Leverages an agentic system (using Google Gemini as an orchestrator and local TxGemma models as tools) to propose novel, testable hypotheses based on user-defined topics/focus areas and generate detailed preclinical research plans.
 
-The pipeline is designed to be configurable via user input and utilizes environment variables for secure API key management and optional proxy configuration. Logging provides detailed insight into the execution flow.
+The system uses Google's Gemini API (via `google-generativeai`) as the primary orchestrator/generator and specialized models like TxGemma Predict locally for specific tasks. It aims to streamline research workflows by automating information gathering, synthesis, and ideation.
+
+The project now includes an interactive web interface built with **Streamlit**, allowing users to easily select modes, input parameters, and view results directly in their browser.
 
 ## 2. Key Features
 
-*   **Automated Paper Discovery:** Searches arXiv based on user-defined or LLM-generated keywords and filters.
-*   **LLM-Powered Ranking:** Ranks search results by relevance using Gemini.
-*   **PDF Processing:** Downloads relevant papers and extracts full text using `pdfminer.six`.
-*   **Detailed Article Reviews:** Generates structured summaries for each selected paper via LLM.
-*   **Intelligent Synthesis:** Creates a structured literature review draft by synthesizing individual article reviews using LLM, following specific section prompts.
-*   **AI-Driven Critique:** Evaluates the generated draft using LLM against defined quality metrics.
-*   **Iterative Refinement:** Automatically decides whether to stop, refine, or restart the review generation based on critique scores, aiming for quality improvement.
-*   **Content Generation:** Automatically generates a suitable Title and Abstract for the final review.
-*   **Citation Management:** Creates a formatted reference list and replaces in-text markers with corresponding numbers.
-*   **PDF Report Generation:** Produces a formatted PDF document of the final literature review using `reportlab`.
-*   **User Configuration:** Allows setting the topic, focus, article count, year range, and keywords via command-line input.
-*   **Proxy Support:** Configurable HTTP/HTTPS proxy via environment variables.
-*   **Logging:** Detailed execution logs saved to `review_generator.log`.
+*   **Dual Modes:** Choose between generating a comprehensive literature review or a novel hypothesis with a research plan.
+*   **Interactive Web Interface (Streamlit):** User-friendly GUI for running pipelines and viewing outputs.
+*   **Modular Design:** Code is organized into distinct modules for configuration, utilities, tools, agent logic, and pipelines.
+*   **LLM-Powered:**
+    *   **Literature Review:** Uses Gemini for keyword generation, abstract ranking, article review generation, section synthesis, critique, and refinement. Uses `arxiv` library for paper discovery.
+    *   **Hypothesis Generation:** Employs an agentic system (`GeneratorAgent`) orchestrated by Gemini, which uses specialized tools.
+*   **Tool Integration (Hypothesis Mode):**
+    *   **TxGemma Predict (Local):** Runs `google/txgemma-2b-predict` locally (with 4-bit quantization for efficiency) to predict properties like clinical toxicity (`ClinicalToxTool`), BBB permeability (`BBBPredictTool`), etc., acting as tools for the agent.
+    *   **PubMed Search:** Queries PubMed via the Entrez API (`BioPython`) to retrieve relevant article metadata based on agent requests.
+*   **Iterative Refinement (Review Mode):** Includes an AI-driven critique and refinement loop to improve the quality of the generated literature review over multiple iterations.
+*   **User Configuration:** 
+    *   **Streamlit UI:** Allows setting the primary mode, research topic, specific focus, goals, article filters (for review mode), and keywords via interactive widgets.
+*   **Output Formatting:**
+    *   Saves intermediate results (for review mode) and final structured data in JSON format.
+    *   Produces a final, formatted report in PDF using `reportlab`.
+*   **Environment Management:** Uses `.env` for secure API key management and optional proxy configuration (`python-dotenv`).
+*   **Dependency Management:** Includes a `requirements.txt` file.
 
 ## 3. Technology Stack
 
-*   **Python:** (version 3.13)
+*   **Python:** (version 3.9+ recommended)
+*   **Web Interface:**
+    *   `streamlit`: For building the interactive user interface.
 *   **Core Libraries:**
-    *   `google-generativeai`: For interacting with the Gemini LLM.
-    *   `arxiv`: For searching and retrieving papers from arXiv.
-    *   `requests`: For downloading PDFs.
-    *   `pdfminer.six`: For extracting text from PDFs.
-    *   `reportlab`: For generating the final PDF report.
-    *   `python-dotenv`: For managing environment variables (API keys, proxy).
-*   **Services:**
-    *   Google AI Studio (Gemini API)
-    *   arXiv API
+    *   `google-generativeai`: For interacting with the Gemini LLM API (Orchestrator).
+    *   `transformers`: For loading and running local TxGemma Predict models.
+    *   `torch`: Required by Transformers.
+    *   `accelerate`: For efficient model loading across devices.
+    *   `bitsandbytes`: For 4-bit quantization of local models.
+    *   `huggingface_hub`: For downloading model files and prompt templates.
+    *   `python-dotenv`: For managing environment variables.
+    *   `requests`: (Potentially used by HF Hub or for downloads).
+    *   `arxiv`: (Used only in Literature Review mode).
+    *   `pdfminer.six`: (Used only in Literature Review mode).
+    *   `BioPython`: For PubMed Search tool (Entrez API).
+    *   `reportlab`: For generating PDF reports.
+*   **Services / Models:**
+    *   Google AI Studio / Vertex AI (Gemini API Key required).
+    *   TxGemma Models (e.g., `google/txgemma-2b-predict` from Hugging Face).
+    *   arXiv API (for Literature Review mode).
+    *   PubMed Entrez API (for Hypothesis Generation mode).
 
 ## 4. Installation
 
 Follow these steps to set up the project environment:
 
 1.  **Prerequisites:**
-    *   Ensure you have Python (version 3.9 or higher recommended) and `pip` installed.
+    *   Python (3.9+ recommended) and `pip`.
     *   Git (optional, for cloning).
+    *   **(For Local TxGemma/GPU usage):** An NVIDIA GPU with appropriate drivers and CUDA Toolkit installed (check compatibility with PyTorch/bitsandbytes).
 
 2.  **Clone the Repository (if applicable):**
     ```bash
@@ -57,94 +70,161 @@ Follow these steps to set up the project environment:
     cd <project-directory-name>
     ```
 
-3.  **Create and Activate a Virtual Environment (Recommended):**
+3.  **Create and Activate Virtual Environment:**
     ```bash
     python -m venv venv
-    # On Windows
-    venv\Scripts\activate
-    # On macOS/Linux
-    source venv/bin/activate
+    # On Windows: venv\Scripts\activate
+    # On macOS/Linux: source venv/bin/activate
     ```
 
 4.  **Install Dependencies:**
-    The required Python packages are listed in `requirements.txt`. Install them using pip:
     ```bash
     pip install -r requirements.txt
+    # Note: Installing PyTorch with CUDA support might require a specific command
+    # from the PyTorch website (pytorch.org) depending on your CUDA version.
+    # Ensure bitsandbytes is installed correctly for your OS and CUDA version.
     ```
 
-5.  **Set up Google AI (Gemini) API Key:**
-    *   Obtain an API key from [Google AI Studio](https://aistudio.google.com/app/apikey).
-    *   Create a file named `.env` in the root directory of the project.
-    *   Add the following line to the `.env` file, replacing `YOUR_API_KEY_HERE` with your actual key:
+5.  **Set up API Keys and Configuration:**
+    *   Create a file named `.env` in the project root directory (`llmagents/`).
+    *   Add your keys:
         ```dotenv
-        GOOGLE_API_KEY='YOUR_API_KEY_HERE'
+        GOOGLE_API_KEY='YOUR_GEMINI_API_KEY_HERE'
+        HF_TOKEN='YOUR_HUGGINGFACE_TOKEN_HERE'
+        # Required for PubMed tool - replace with your actual email
+        MY_EMAIL_FOR_PUBMED='your.email@example.com'
+        # Optional Proxy Settings
+        # PROXY_HOST=...
+        # PROXY_PORT=...
+        # PROXY_USER=...
+        # PROXY_PASSWORD=...
         ```
-    *   **Important:** Add `.env` to your `.gitignore` file to avoid committing your API key.
+    *   **Crucially:** Add `.env` to your `.gitignore` file.
+    *   Review and adjust settings in `config.py` (e.g., model IDs, default paths, number of agent steps).
 
-6.  **Configure Proxy (Optional):**
-    *   If you need to use a proxy to access the internet (for Gemini API, arXiv, PDF downloads), add the following lines to your `.env` file, replacing the placeholders with your actual proxy details:
-        ```dotenv
-        PROXY_HOST=your_proxy_host
-        PROXY_PORT=your_proxy_port
-        PROXY_USER=your_proxy_user
-        PROXY_PASSWORD=your_proxy_password
-        ```
-    *   If these variables are not set or incomplete, the script will attempt to run without a proxy.
+6.  **Download TDC Prompts JSON:**
+    *   Ensure the `tdc_prompts.json` file exists in the location specified by `config.TDC_PROMPTS_FILENAME`. The script will attempt to download it from Hugging Face Hub if not found locally, but having it locally is more reliable.
 
 ## 5. Usage
+There are now two main ways to run the application:
+
+### 5.1. Using the Streamlit Web Interface (Recommended for Users)
 
 1.  **Activate Virtual Environment:**
     ```bash
     # Windows: venv\Scripts\activate
     # macOS/Linux: source venv/bin/activate
     ```
-2.  **Run the Main Script:**
+2.  **Navigate to the project root directory** (e.g., `llmagents/`) in your terminal.
+3.  **Run the Streamlit App:**
+    ```bash
+    streamlit run app.py
+    ```
+    This will typically open the application 자동으로 in your default web browser.
+4.  **Interact with the UI:**
+    *   Select the desired mode: "Generate Literature Review" or "Generate Hypothesis & Plan".
+    *   Fill in the input parameters specific to the selected mode.
+    *   Click the "Generate" button.
+    *   Monitor progress (spinners will be shown) and view the results directly on the page.
+    *   Download generated PDF reports using the provided buttons.
+
+    **Note for TxGemma (Hypothesis Mode):** If you encounter issues with local model loading (especially on repeated runs without Streamlit's watcher enabled via `--server.fileWatcherType none` for development), and see errors related to GPU memory or `torch._classes`, try running Streamlit with the file watcher disabled for more stability during local model use:
+    ```bash
+    streamlit run app.py --server.fileWatcherType none
+    ```
+    This is particularly relevant if you are actively developing and `torch`-related errors appear due to how Streamlit monitors file changes. For regular use after development, the simple `streamlit run app.py` should suffice if model caching is implemented correctly.
+
+### 5.2. Using the Command-Line Interface (Legacy/Backend Testing)
+
+1.  **Activate Virtual Environment** (as above).
+2.  **Run the Main Script from Project Root:**
     ```bash
     python main.py
     ```
-3.  **Provide Input Parameters:** The script will prompt you to enter the following:
-    *   **Research Topic:** The main subject of the review (e.g., "LLMs in Drug Research").
-    *   **Specification Prompt:** Optional specific focus (e.g., "Focus on novel methods..."). Press Enter to use default or skip if default is empty.
-    *   **Number of Articles:** How many top-ranked articles to include (e.g., 10).
-    *   **Article Years Filter:** Year range like "YYYY-YYYY" (e.g., "2020-2025"), or type "skip", or press Enter for default.
-    *   **Keywords:** Comma-separated keywords. Press Enter to let the script auto-generate them based on the topic.
+3.  **Select Mode:** Choose '1' for Literature Review or '2' for Hypothesis Generation when prompted.
+4.  **Provide Input Parameters:** Answer the prompts specific to the selected mode.
+5.  **Execution & Output:** The selected pipeline will run. Monitor the console and `agent_runner.log` for progress. Final results (PDFs, JSONs) will be saved to the directory specified in `config.OUTPUT_DIR` (e.g., `output/`).
 
-4.  **Execution:** The pipeline will start, logging its progress to the console and `review_generator.log`. This may take a significant amount of time depending on the number of articles, iterations, and LLM response times.
+## 6. Project Structure (Example)
 
-5.  **Output Files:** Upon completion (or failure), check the project directory for:
-    *   `review_generator.log`: Detailed logs of the entire process.
-    *   `downloaded_pdfs/`: Folder containing downloaded PDF articles.
-    *   `run_*.json`: Intermediate JSON files for each research/critique cycle.
-    *   `final_literature_review.json`: A JSON file containing the final results, including the best review text, sections, generated title/abstract, formatted references, final scores, metadata, etc.
-    *   `final_literature_review.pdf`: The final, formatted literature review document.
+llmagents/
 
-## 6. Project Structure
-.
-├── .env # Stores API keys and proxy settings (user-created, gitignored)
-├── agents.py # Defines ResearchAgent, ReviewCriticAgent, ReviewRefinerAgent classes
-├── downloaded_pdfs/ # Directory for downloaded papers (created by script)
-├── literature_review_pipeline.py # Contains the main iterative pipeline function (run_literature_review_pipeline)
-├── main.py # Main script: handles user input, runs the pipeline, processes final output
-├── requirements.txt # Project dependencies (user-creates from list above)
-├── utils.py # Helper functions (API calls, PDF generation, text processing)
-├── review_generator.log # Log file (created by script)
-├── review_runs/ # Directory for intermediate run outputs (created by script)
-├── final_literature_review.json # Final structured results (created by script)
-└── final_literature_review.pdf # Final PDF report (created by script)
+├── .env # API keys, proxy (user-created, gitignored)
 
-      
-*   **`main.py`:** Entry point, user interaction, pipeline invocation, final output handling.
-*   **`review_pipeline.py`:** Contains the core `run_review_pipeline` function orchestrating the iterative generation and refinement process.
-*   **`agents.py`:** Defines the logic for the different AI agents involved (research, critique, refinement decision-making).
-*   **`utils.py`:** Provides reusable utility functions used by agents and the pipeline.
+├── .gitignore
 
+├── app.py                       # Streamlit application entry point
+
+├── main.py                      # Legacy command-line entry point
+
+├── config.py                    # Configuration constants
+
+├── requirements.txt             # Python dependencies
+
+├── hypothesis_planning_module/  # Module for hypothesis generation
+
+│ ├── init.py
+
+│ ├── hypothesis_agent.py        # GeneratorAgent class 
+
+│ ├── hypothesis_pipeline.py     # run_hypothesis_pipeline function
+
+│ └── orchestrator.py            # Gemini API call function
+
+├── review_module/               # Module for literature review generation
+
+│ ├── init.py
+
+│ ├── review_agents.py           # ResearchAgent, ReviewCriticAgent, ReviewRefinerAgent
+
+│ └── review_pipeline.py         # run_review_pipeline function
+
+├── tools/                       # Reusable agent tools
+
+│ ├── init.py
+
+│ ├── tool_manager.py            # ToolManager class
+
+│ ├── pubmed_tool.py             # PubMedSearch class
+
+│ └── txgemma_predict_tool.py    # ClinicalTox, BBBPredictTool classes
+
+├── utils/                       # General utility functions
+
+│ ├── init.py
+
+│ ├── llm_clients.py             # Functions to load local models/prompts
+
+│ ├── pdf_generator.py           # PDF generation functions (shared or specific)
+
+│ ├── txgemma_loader.py          # TxGemma using 
+
+│ ├── ui_utils.py                # Helper functions for Streamlit UI components
+
+│ └── text_parser.py             # Text parsing functions (e.g., extract_prompt)
+
+├── prompts/ # Directory for shared/other prompts
+
+│ ├── init.py
+
+│ ├── tdc_prompts.json # TDC task prompts (downloaded or placed by user)
+
+│ ├── hypothesis_prompts.py
+
+│ ├── review_prompts.py
+
+└── output/ # Directory for final PDF/JSON outputs (created by script)
+
+│ └── ...
+    # Streamlit UI might also trigger saves here or in a sub-directory based on config
 
 ## 7. Potential Improvements / Future Work
 
-*   Implement more sophisticated error handling and recovery within the pipeline.
-*   Allow configuration of LLM models and parameters (e.g., temperature) via config file or command line.
-*   Integrate more advanced PDF text extraction techniques if `pdfminer.six` struggles with certain layouts.
-*   Implement caching for API calls and intermediate results to speed up repeated runs.
-*   Explore different strategies for synthesizing sections (e.g., multi-step generation).
-*   Add support for other academic search engines besides arXiv.
-*   Improve the reliability of parsing LLM outputs (e.g., JSON critique, ranked lists).
+*   Implement a chat interface (especially for Hypothesis mode) to allow users to iteratively refine the AI's output or ask follow-up questions.
+*   Refine LLM prompts for more consistent tool call formatting.
+*   Implement more robust error handling and recovery within agent loops.
+*   Add more sophisticated tools (e.g., chemical database search by structure, gene/protein info tools, web search).
+*   Implement the iterative critique/refinement loop for the hypothesis generation mode.
+*   Allow configuration of specific LLM models (e.g., different Gemini versions, different local models) via `config.py`.
+*   Improve PDF generation formatting and parsing of complex LLM outputs.
+*   Add unit and integration tests.

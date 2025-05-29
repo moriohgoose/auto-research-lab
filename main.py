@@ -1,3 +1,12 @@
+"""
+This script serves as the main entry point for the Auto Research Lab's backend,
+orchestrating the execution of either a literature review pipeline or a hypothesis
+generation pipeline based on user input.
+
+It handles environment setup, API key configuration, proxy settings, user interaction
+for parameter collection, pipeline execution, and saving of results (JSON and PDF).
+"""
+
 import os
 import sys
 import google.generativeai as genai
@@ -8,10 +17,15 @@ import logging
 import time 
 from typing import Optional, List, Dict, Any
 
+# --- Project Root Path Configuration ---
+# This allows modules within the project (e.g., 'config', 'review_module') to be
+# imported correctly, regardless of where the script is executed from
 project_root_dir = os.path.dirname(os.path.abspath(__file__))
 if project_root_dir not in sys.path:
     sys.path.insert(0, project_root_dir)
 
+# --- Logging Configuration ---
+# Sets up the global logging system for the application
 logging.basicConfig(
     level=logging.INFO,  
     format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s', 
@@ -22,17 +36,23 @@ logging.basicConfig(
     ]
 )
 
-import config
-from review_module.review_pipeline import run_review_pipeline
-from hypothesis_planning_module.hypothesis_pipeline import run_hypothesis_pipeline
-from utils.pdf_generator import save_review_pdf, save_hypothesis_pdf
+# --- Module Imports ---
+# Imports custom modules and functions necessary for the application's core logic.
+# These imports are placed after the logging setup to ensure any issues are logged.
+try:
+    import config # Imports the configuration settings for the project (e.g., API model names, output directories).
+    from review_module.review_pipeline import run_review_pipeline # Function to execute the literature review process.
+    from hypothesis_planning_module.hypothesis_pipeline import run_hypothesis_pipeline # Function to execute the hypothesis generation process.
+    from utils.pdf_generator import save_review_pdf, save_hypothesis_pdf # Functions for generating PDF reports from results.
+except ImportError as e:
+    logging.critical(f"Failed to import core modules. Please ensure all dependencies are installed and paths are correct: {e}", exc_info=True)
+    sys.exit(1) # Exit if critical modules cannot be imported.
 
-script_start_time = time.time()
-
+# --- Global Configuration Variables ---
 PROJECT_ROOT_DIR = config.PROJECT_ROOT_DIR
 GEMINI_API_MODEL_NAME = config.GEMINI_API_MODEL_NAME
 
-# Load environment variables
+# --- Load Environment Variables ---
 load_dotenv()
 logging.info("Loaded environment variables.")
 
@@ -89,6 +109,7 @@ if __name__ == '__main__':
     print("=" * 50)
 
     # --- Mode Selection ---
+    # Prompts the user to select an operational mode: Literature Review or Hypothesis Generation
     while True:
         print("\nPlease choose the execution mode:")
         print("  1: Generate Literature Review")
@@ -96,6 +117,7 @@ if __name__ == '__main__':
         mode_choice = input("Enter your choice (1 or 2): ")
         if mode_choice == '1':
             selected_mode = "review"
+            # Basic check to ensure the review pipeline function was imported successfully
             if run_review_pipeline is None:
                  print("Error: Literature review module is not available due to import errors. Cannot proceed.")
                  exit()
@@ -103,6 +125,7 @@ if __name__ == '__main__':
             break
         elif mode_choice == '2':
             selected_mode = "hypothesis"
+            # Basic check to ensure the hypothesis pipeline function was imported successfully
             if run_hypothesis_pipeline is None:
                  print("Error: Hypothesis generation module is not available due to import errors. Cannot proceed.")
                  exit()
@@ -114,7 +137,7 @@ if __name__ == '__main__':
     print("-" * 50)
 
     # --- Parameter Collection (Common and Mode-Specific) ---
-    # Initialize variables
+    # Initializes variables to store user-provided parameters for the chosen mode
     research_topic = ""
     specification_prompt = None
     article_count_filter = 10 # Default for review
@@ -240,11 +263,14 @@ if __name__ == '__main__':
         print("-" * 30)
 
     # --- Pipeline Execution ---
-    final_data: Optional[Dict[str, Any]] = None
-    final_pdf_path: Optional[str] = None
+    # Records the start time to calculate total execution duration
+    script_start_time = time.time()
+    final_data: Optional[Dict[str, Any]] = None # Stores the final results dictionary from the pipeline
+    final_pdf_path: Optional[str] = None # Stores the path to the generated PDF report
 
     if selected_mode == "review":
         logging.info("Starting Literature Review Pipeline...")
+        # Calls the literature review pipeline function with the collected parameters
         final_data = run_review_pipeline(
             research_topic=research_topic,
             specification_prompt=specification_prompt,
@@ -256,13 +282,15 @@ if __name__ == '__main__':
         )
         logging.info("Literature Review Pipeline finished.")
         
-        # Post-processing for review PDF
+        # --- Post-processing for Literature Review PDF ---
+        # If the pipeline ran successfully and returned data, attempts to save a PDF report
         if final_data and final_data.get("error") is None:
             # Save PDF review
             if save_review_pdf and final_data.get("final_review_sections"):
                 pdf_filename_review = f"literature_review_{research_topic.replace(' ','_')[:20]}_{int(time.time())}.pdf"
                 pdf_filepath_review = os.path.join(config.OUTPUT_DIR, pdf_filename_review)
                 try:
+                    # Calls the PDF generation utility function
                     review_pdf_saved = save_review_pdf(
                         title=final_data.get("title"),
                         abstract=final_data.get("abstract"),
@@ -286,9 +314,10 @@ if __name__ == '__main__':
 
     elif selected_mode == "hypothesis":
         logging.info("Starting Hypothesis Generation Pipeline...")
-        # Get email for PubMed (crucial)
+        # Get email for PubMed 
         user_email = pubmed_email
 
+        # Calls the hypothesis generation pipeline function with the collected parameters
         final_data = run_hypothesis_pipeline(
             user_topic=research_topic,
             user_focus=user_focus,
@@ -298,17 +327,20 @@ if __name__ == '__main__':
         )
         logging.info("Hypothesis Generation Pipeline finished.")
 
-        # Post-processing for hypothesis PDF
+        # --- Post-processing for Hypothesis PDF ---
+        # If the pipeline ran successfully and returned data, attempts to save a PDF report
         if final_data and "error" not in final_data and save_hypothesis_pdf:
             response_text = final_data.get("final_agent_response")
             if response_text:
                 pdf_filename = f"hypothesis_plan_{research_topic.replace(' ','_')[:20]}_{int(time.time())}.pdf"
                 pdf_filepath = os.path.join(getattr(config, 'OUTPUT_DIR', '.'), pdf_filename) # Use output dir from config
                 os.makedirs(os.path.dirname(pdf_filepath), exist_ok=True)
+                
+                # Calls the PDF generation utility function for hypothesis
                 try:
-                    hyp_pdf_saved = save_hypothesis_pdf(response_text, pdf_filepath, title=f"Hypothesis & Plan: {research_topic}") # Передаем title
+                    hyp_pdf_saved = save_hypothesis_pdf(response_text, pdf_filepath, title=f"Hypothesis & Plan: {research_topic}")
                     if hyp_pdf_saved:
-                        final_pdf_path = pdf_filepath # Сохраняем путь к этому PDF
+                        final_pdf_path = pdf_filepath # Save PDF path
                         logging.info(f"Hypothesis/plan PDF saved to: {final_pdf_path}")
                     else:
                         logging.warning("Hypothesis/plan PDF generation function returned False.")
@@ -328,7 +360,7 @@ if __name__ == '__main__':
         logging.info("Pipeline completed successfully.")
         print("\n--- Final Agent Output ---")
 
-        # Print either review or hypothesis text
+        # Prints a snippet of the generated text (either review or hypothesis response)
         final_text_key = "final_literature_review_text" if selected_mode == "review" else "final_agent_response"
         final_text = final_data.get(final_text_key)
         if final_text:
@@ -336,7 +368,8 @@ if __name__ == '__main__':
         else:
             print("(No final text generated)")
 
-        # Save final JSON data (contains everything)
+        # Saves the complete final data dictionary to a JSON file.
+        # This includes all intermediate steps and final results, useful for debugging or further processing.
         json_filename = f"final_{selected_mode}_output_{int(time.time())}.json"
         json_filepath = os.path.join(getattr(config, 'OUTPUT_DIR', '.'), json_filename) # Save JSON near PDF
         try:
@@ -348,12 +381,13 @@ if __name__ == '__main__':
             logging.error(f"Error saving final output JSON: {e}", exc_info=True)
 
     elif final_data and final_data.get("error"):
-         error_msg = final_data.get('error', 'Unknown error')
-         logging.error(f"Pipeline failed with error: {error_msg}")
-         print(f"\nPipeline execution failed: {error_msg}")
+        error_msg = final_data.get('error', 'Unknown error')
+        logging.error(f"Pipeline failed with error: {error_msg}")
+        print(f"\nPipeline execution failed: {error_msg}")
     else:
-         logging.error("Pipeline execution failed critically and returned no data.")
-         print("\nPipeline execution failed critically.")
+         # Catches cases where the pipeline returned no data at all (e.g., very early failure)        
+        logging.error("Pipeline execution failed critically and returned no data.")
+        print("\nPipeline execution failed critically.")
 
     logging.info("Application finished.")
     script_end_time = time.time()

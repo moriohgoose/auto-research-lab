@@ -200,15 +200,15 @@ class ResearchAgent:
                             valid_ranked_ids.append(arxiv_id_key)
                             seen_ids.add(arxiv_id_key)
                     else:
-                         # Log if the LLM returns an ID we didn't find initially
-                         logging.warning(f"Ranked URL '{arxiv_id_key}' from LLM not found in initial metadata keys.")
+                        # Log if the LLM returns an ID we didn't find initially
+                        logging.warning(f"Ranked URL '{arxiv_id_key}' from LLM not found in initial metadata keys.")
 
                 self.ranked_arxiv_ids = valid_ranked_ids
                 logging.info(f"Processed LLM response, found {len(valid_ranked_ids)} valid and unique ranked IDs matching metadata.")
                 logging.debug(f"Final ranked IDs (up to 10): {self.ranked_arxiv_ids[:10]}")
 
                 if not self.ranked_arxiv_ids:
-                     logging.warning("LLM ranking response parsed, but no valid/matching IDs found after processing.")
+                    logging.warning("LLM ranking response parsed, but no valid/matching IDs found after processing.")
 
             else: # Regex found no matches
                 logging.warning("LLM ranking response did not contain recognizable ArXiv ABS URLs.")
@@ -477,8 +477,8 @@ class ResearchAgent:
         total_sections_to_generate = len(rp.LIT_REVIEW_SECTIONS_CONFIG)
         logging.info(f"Finished generating review sections. Successfully generated {successful_sections_count}/{total_sections_to_generate} sections.")
         if successful_sections_count < total_sections_to_generate:
-             failed_sections = [key for key, content in self.review_sections.items() if content.startswith("Error:")]
-             logging.warning(f"  Failed to generate sections: {failed_sections}")
+            failed_sections = [key for key, content in self.review_sections.items() if content.startswith("Error:")]
+            logging.warning(f"  Failed to generate sections: {failed_sections}")
 
 
     def consolidate_reviews(self):
@@ -491,24 +491,24 @@ class ResearchAgent:
 
         # New section order reflecting the split
         section_order = [
-             ("Introduction", "introduction"),
-             ("Key Themes and Trends", "key_themes"),
-             ("Methods and Technologies", "methods_technologies"),
-             ("Resources and Datasets", "resources_datasets"),
-             ("Challenges and Limitations", "challenges_limitations"),
-             ("Proposed Research Pipeline", "proposed_pipeline"),
-             ("Conclusion", "conclusion")
+            ("Introduction", "introduction"),
+            ("Key Themes and Trends", "key_themes"),
+            ("Methods and Technologies", "methods_technologies"),
+            ("Resources and Datasets", "resources_datasets"),
+            ("Challenges and Limitations", "challenges_limitations"),
+            ("Proposed Research Pipeline", "proposed_pipeline"),
+            ("Conclusion", "conclusion")
         ]
 
         for title, key in section_order:
-             content = self.review_sections.get(key)
-             # Add Markdown H2 heading for structure in the text file
-             literature_review_parts.append(f"## {title}\n")
-             if content and not content.startswith("Error:"):
-                 literature_review_parts.append(content.strip())
-             else:
-                 literature_review_parts.append("*Section generation failed or skipped.*")
-             literature_review_parts.append("\n") # Add a newline after the content
+            content = self.review_sections.get(key)
+            # Add Markdown H2 heading for structure in the text file
+            literature_review_parts.append(f"## {title}\n")
+            if content and not content.startswith("Error:"):
+                literature_review_parts.append(content.strip())
+            else:
+                literature_review_parts.append("*Section generation failed or skipped.*")
+            literature_review_parts.append("\n") # Add a newline after the content
 
         # Remove the trailing '---' separator if it was added before
         self.literature_review = "\n".join(literature_review_parts).strip()
@@ -529,8 +529,8 @@ class ResearchAgent:
         truncated_review = review_text
 
         if len(review_text) > max_len:
-             truncated_review = review_text[:max_len] + "\n... (review text truncated for title/abstract prompt)"
-             logging.warning(f"  Review text truncated to {max_len} chars for title/abstract generation.")
+            truncated_review = review_text[:max_len] + "\n... (review text truncated for title/abstract prompt)"
+            logging.warning(f"  Review text truncated to {max_len} chars for title/abstract generation.")
 
         prompt = rp.TITLE_ABSTRACT_PROMPT_TEMPLATE.format(truncated_review=truncated_review)
         
@@ -549,14 +549,14 @@ class ResearchAgent:
             if title_match:
                 title = title_match.group(1).strip()
             else:
-                 logging.warning("  Could not parse 'Title:' from Gemini response.")
+                logging.warning("  Could not parse 'Title:' from Gemini response.")
 
             if abstract_match:
                 abstract = abstract_match.group(1).strip()
-                 # Clean up potential extra newlines in abstract
+                # Clean up potential extra newlines in abstract
                 abstract = re.sub(r'\s+', ' ', abstract).strip()
             else:
-                 logging.warning("  Could not parse 'Abstract:' from Gemini response.")
+                logging.warning("  Could not parse 'Abstract:' from Gemini response.")
 
             logging.info(f"  Generated Title: {title}")
             logging.info(f"  Generated Abstract: {abstract[:100]}...")
@@ -654,7 +654,7 @@ class ResearchAgent:
                 full_text = self.extract_full_text_from_pdf(pdf_filename)
                 if full_text:
                     logging.debug(f"Successfully extracted text for {arxiv_id_key}, adding to cache.")
-                    self.pdf_texts[arxiv_id_key] = full_text # <<< save to cache >>>
+                    self.pdf_texts[arxiv_id_key] = full_text # save to cache
                     current_run_pdf_texts[arxiv_id_key] = full_text
                     extracted_newly_count += 1
             
@@ -665,7 +665,7 @@ class ResearchAgent:
                     current_run_pdf_texts[arxiv_id_key] = "Error: PDF text extraction failed."
                     failed_extraction_count += 1
             else:
-                 # PDF not find
+                # PDF not find
                 logging.warning(f"PDF file not found for {arxiv_id_key} at {pdf_filename}. Cannot extract text.")
                 self.pdf_texts[arxiv_id_key] = "Error: PDF file not found."
                 missing_pdf_count += 1

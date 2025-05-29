@@ -2,9 +2,10 @@ import logging
 import json
 import time
 import os 
+import re
 from typing import Optional, List, Dict, Any 
 from .review_agents import ResearchAgent, ReviewCriticAgent, ReviewRefinerAgent
-from utils.pdf_generator import format_references_list
+from utils.pdf_generator import format_references_list, replace_ids_with_numbers
 
 MODULE_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 RUN_OUTPUT_DIR = os.path.join(MODULE_ROOT_DIR, "pipeline_run_outputs")
@@ -46,30 +47,79 @@ def _prepare_final_output(
         Dict[str, Any]: A dictionary containing all the relevant output data.
     """
     # Format the final reference list based on the IDs and metadata of the best run.
+    processed_abstract_for_display = abstract
+    processed_review_sections_for_display = review_sections.copy()
 
-    final_references = []
+    short_arxiv_ids_ordered_for_replacer = []
+    for full_url in arxiv_ids:
+        match = re.search(r'([\d.]+v?\d*)$', full_url) # Get 'XXXX.XXXXXvx'
+        if match:
+            short_arxiv_ids_ordered_for_replacer.append(match.group(1))
+        else:
+            # Fallback if ID cannot be extracted, use the full URL as key.
+            logging.warning(f"Could not extract short ID from URL '{full_url}'. Using full URL for replacer map.")
+            short_arxiv_ids_ordered_for_replacer.append(full_url) # fallback
+
+    # Recreate the metadata dictionary with short IDs as keys for the replacer functio
+    metadata_with_short_ids_for_replacer = {}
+    for full_url_key, meta_val in metadata.items():
+        match = re.search(r'([\d.]+v?\d*)$', full_url_key)
+        if match:
+            metadata_with_short_ids_for_replacer[match.group(1)] = meta_val
+        else:
+            metadata_with_short_ids_for_replacer[full_url_key] = meta_val
+
+
+    # 1. Apply citation replacement to the abstract text.
+    # This transforms placeholders like `[ID: 2103.01234]` to `[1]` in the final output.
+    if abstract and short_arxiv_ids_ordered_for_replacer and metadata_with_short_ids_for_replacer:
+        try:
+            processed_abstract_for_display = replace_ids_with_numbers(
+                abstract,
+                short_arxiv_ids_ordered_for_replacer,
+                metadata_with_short_ids_for_replacer
+            )
+        except Exception as e:
+            logging.error(f"Error processing abstract for ID replacement: {e}")
+
+    for section_key, section_content in review_sections.items():
+        if section_content and short_arxiv_ids_ordered_for_replacer and metadata_with_short_ids_for_replacer:
+            try:
+                processed_review_sections_for_display[section_key] = replace_ids_with_numbers(
+                    section_content,
+                    short_arxiv_ids_ordered_for_replacer,
+                    metadata_with_short_ids_for_replacer
+                )
+            except Exception as e:
+                logging.error(f"Error processing section '{section_key}' for ID replacement: {e}")
+
+
+    # 2. Format the list of references for display.
+    # This function uses the original full arXiv IDs and metadata to construct
+    # standard bibliography entries (e.g., "Authors (Year). Title. Journal.").
+    final_references_for_display = []
     if arxiv_ids and metadata:
         try:
-            # Call the utility function to format references
-            final_references = format_references_list(arxiv_ids, metadata) # <--- ВЫЗЫВАЕМ ЗДЕСЬ
+            final_references_for_display = format_references_list(arxiv_ids, metadata)
         except Exception as ref_e:
             logging.error(f"Error formatting references for final output: {ref_e}")
 
+    # Return the comprehensive dictionary of all final output data
     return {
-        "title": title,
-        "abstract": abstract,
-        "final_literature_review_text": review_text,
-        "final_review_sections": review_sections,
-        "references_formatted": final_references, 
-        "final_review_scores": scores,
-        "source_run_number": run_number, # Run count of the ResearchAgent that produced this
-        "termination_reason": termination_reason,
-        "total_iterations_performed": total_iterations,
-        "research_topic": topic,
-        "specification_prompt": spec,
-        "keywords_used": keywords, # Store the actual keywords used (could be generated)
-        "best_run_arxiv_ids": arxiv_ids,
-        "best_run_metadata": metadata,
+        "title": title, # The final generated title
+        "abstract": processed_abstract_for_display, # Abstract with numbered citations
+        "final_literature_review_text": review_text, # The full, raw text of the best review
+        "final_review_sections": processed_review_sections_for_display, # Structured sections with numbered citations
+        "references_formatted": final_references_for_display, # List of neatly formatted reference strings
+        "final_review_scores": scores, # Scores from the critic for the best review
+        "source_run_number": run_number, # The ResearchAgent run number that produced this best review
+        "termination_reason": termination_reason, # Reason for pipeline termination
+        "total_iterations_performed": total_iterations, # Total refinement iterations
+        "research_topic": topic, # Original input research topic
+        "specification_prompt": spec, # Original input specification prompt
+        "keywords_used": keywords, # Actual keywords used in the search
+        "best_run_arxiv_ids": arxiv_ids, # List of full arXiv URLs (for generating clickable links in UI)
+        "best_run_metadata": metadata, # Original metadata for articles in the best review
     }
 
 

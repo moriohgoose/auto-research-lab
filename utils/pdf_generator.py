@@ -264,13 +264,13 @@ def save_review_pdf(title: Optional[str], abstract: Optional[str],
 
         # 3. Main body
         section_order = [ 
-             ("Introduction", "introduction"),
-             ("Key Themes and Trends", "key_themes"),
-             ("Methods and Technologies", "methods_technologies"),
-             ("Resources and Datasets", "resources_datasets"),
-             ("Challenges and Limitations", "challenges_limitations"),
-             ("Proposed Research Pipeline", "proposed_pipeline"),
-             ("Conclusion", "conclusion")
+            ("Introduction", "introduction"),
+            ("Key Themes and Trends", "key_themes"),
+            ("Methods and Technologies", "methods_technologies"),
+            ("Resources and Datasets", "resources_datasets"),
+            ("Challenges and Limitations", "challenges_limitations"),
+            ("Proposed Research Pipeline", "proposed_pipeline"),
+            ("Conclusion", "conclusion")
         ]
 
         for title_str, section_key in section_order:
@@ -288,9 +288,9 @@ def save_review_pdf(title: Optional[str], abstract: Optional[str],
                         story.append(Paragraph(formatted_para_text, body_style))
                 story.append(Spacer(1, 6)) 
             else:
-                 story.append(Paragraph(title_str, styles['SectionHeading']))
-                 story.append(Paragraph("<i>Section not generated or contains errors.</i>", body_style))
-                 story.append(Spacer(1, 6))
+                story.append(Paragraph(title_str, styles['SectionHeading']))
+                story.append(Paragraph("<i>Section not generated or contains errors.</i>", body_style))
+                story.append(Spacer(1, 6))
 
         # 4. References
         story.append(PageBreak()) 

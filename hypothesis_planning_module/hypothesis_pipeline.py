@@ -1,8 +1,7 @@
 import logging
 import os
 import time
-import json
-from typing import List, Dict, Optional, Any
+from typing import Dict, Optional, Any
 from dotenv import load_dotenv
 
 from .hypothesis_agent import GeneratorAgent

@@ -1,22 +1,19 @@
 import logging
-import re
-from typing import Dict, Callable, Optional
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from typing import Dict, Callable, Optional, Any
 from utils.text_parser import extract_prompt
 
-PredictorFunc = Callable[[str, AutoModelForCausalLM, AutoTokenizer], str]
+PredictorFunc = Callable[[str, Any, Any], str]
 
 class ClinicalTox:
     """
     Tool to predict potential clinical trial toxicity for a given SMILES string
     using a pre-loaded TxGemma Predict model.
     """
-    def __init__(self, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, prompts_json: Dict):
+    def __init__(self, predictor_func: PredictorFunc, prompts_json: Dict):    
         """Initializes the tool with loaded model, tokenizer, and prompts."""
         self.tool_call_name = "ClinicalToxTool"
         self.task_tdc_name = "ClinTox"
-        self.model = model
-        self.tokenizer = tokenizer
+        self.predictor = predictor_func 
         self.prompts = prompts_json
         if self.task_tdc_name not in self.prompts: raise KeyError(f"Template '{self.task_tdc_name}' not found.")
         logging.debug(f"{self.tool_call_name} initialized.")
@@ -56,10 +53,10 @@ class ClinicalTox:
         except KeyError:
              # Should not happen due to check in __init__, but as safeguard
              logging.error(f"Error using {self.tool_call_name}: Prompt template '{self.task_tdc_name}' missing.")
-             return f"Error: Configuration error for {self.tool_name}."
+             return f"Error: Configuration error for {self.tool_call_name}."
         except Exception as e:
             logging.error(f"Error during {self.tool_call_name} execution for '{smiles_string}': {e}", exc_info=True)
-            return f"Error: Exception during {self.tool_name} prediction."
+            return f"Error: Exception during {self.tool_call_name} prediction."
 
     def tool_is_used(self, query: str) -> bool:
         """Checks if the query string contains the specific call sign for this tool."""
@@ -72,7 +69,7 @@ class ClinicalTox:
     def instructions(self) -> str:
         """Provides instructions for the agent on how to use this tool."""
         return (
-            f"=== {self.tool_name} ({self.tool_call_name}) ===\n"
+            f"=== {self.tool_call_name} ({self.tool_call_name}) ===\n"
             f"Predicts potential clinical trial toxicity for a given molecule.\n"
             f"Format: ```{self.tool_call_name}\n<SMILES string here>\n```\n"
             f"Returns: Prediction whether the compound is likely 'toxic' or 'non-toxic' in clinical trials."
@@ -84,12 +81,11 @@ class BBBPredictTool:
     Tool to predict Blood-Brain Barrier (BBB) permeability for a given SMILES string
     using a pre-loaded TxGemma Predict model.
     """
-    def __init__(self, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, prompts_json: Dict):
+    def __init__(self, predictor_func: PredictorFunc, prompts_json: Dict):    
         """Initializes the tool with loaded model, tokenizer, and prompts."""
         self.tool_call_name = "BBBPredictTool"
         self.task_tdc_name = "BBB_Martins"
-        self.model = model
-        self.tokenizer = tokenizer
+        self.predictor = predictor_func
         self.prompts = prompts_json
         if self.task_tdc_name not in self.prompts: raise KeyError(f"Template '{self.task_tdc_name}' not found.")
         logging.debug(f"{self.tool_call_name} initialized.")
@@ -122,10 +118,10 @@ class BBBPredictTool:
                 return f"Prediction ({self.task_tdc_name}): Could not determine BBB permeability. Raw output: {raw_prediction}"
         except KeyError:
              logging.error(f"Error using {self.tool_call_name}: Prompt template '{self.task_tdc_name}' missing.")
-             return f"Error: Configuration error for {self.tool_name}."
+             return f"Error: Configuration error for {self.tool_call_name}."
         except Exception as e:
             logging.error(f"Error during {self.tool_call_name} execution for '{smiles_string}': {e}", exc_info=True)
-            return f"Error: Exception during {self.tool_name} prediction."
+            return f"Error: Exception during {self.tool_call_name} prediction."
 
     def tool_is_used(self, query: str) -> bool:
         """Checks if the query string contains the call sign for this tool."""
@@ -138,7 +134,7 @@ class BBBPredictTool:
     def instructions(self) -> str:
         """Provides instructions for the agent."""
         return (
-            f"=== {self.tool_name} ({self.tool_call_name}) ===\n"
+            f"=== {self.tool_call_name} ({self.tool_call_name}) ===\n"
             f"Predicts if a molecule is likely to cross the Blood-Brain Barrier (BBB).\n"
             f"Format: ```{self.tool_call_name}\n<SMILES string here>\n```\n"
             f"Returns: Prediction 'CROSS BBB' or 'NOT cross BBB'."
