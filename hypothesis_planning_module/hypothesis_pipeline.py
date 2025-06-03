@@ -13,6 +13,7 @@ from tools.txgemma_predict_tool import ClinicalTox, BBBPredictTool
 
 from utils.txgemma_loader import load_predict_model_and_tokenizer, load_tdc_prompts
 from utils.pdf_generator import save_hypothesis_pdf
+from utils.gradio_txgemma_client import predict_with_gradio_client 
 
 import config
 
@@ -54,13 +55,13 @@ def run_hypothesis_pipeline(
 
     try:
         # --- 1. Load Local LLM Model (Predictor) ---
-        predict_model, predict_tokenizer = load_predict_model_and_tokenizer(
-            model_id=config.TXGEMMA_PREDICT_MODEL_ID,
-            use_quantization=config.USE_QUANTIZATION
-        )
-        if predict_model is None or predict_tokenizer is None:
-             pipeline_result["error"] = "Failed to load local predictor model."
-             raise RuntimeError(pipeline_result["error"]) # Stop process
+        #predict_model, predict_tokenizer = load_predict_model_and_tokenizer(
+        #    model_id=config.TXGEMMA_PREDICT_MODEL_ID,
+        #    use_quantization=config.USE_QUANTIZATION
+        #)
+        #if predict_model is None or predict_tokenizer is None:
+        #     pipeline_result["error"] = "Failed to load local predictor model."
+        #     raise RuntimeError(pipeline_result["error"]) # Stop process
 
         # --- 2. Load TDC Prompts ---
         tdc_prompts = load_tdc_prompts(
@@ -72,15 +73,39 @@ def run_hypothesis_pipeline(
             raise RuntimeError(pipeline_result["error"])        
 
         # --- 3. Define Local Predictor Function ---
-        def _local_predict_func(prompt: str) -> str:
-            if predict_model is None or predict_tokenizer is None: return "Error: Predictor not loaded."
-            if tdc_prompts is None: return "Error: TDC prompts not loaded."
-            try:
-                inputs = predict_tokenizer(prompt, return_tensors="pt").to(predict_model.device)
-                outputs = predict_model.generate(**inputs, max_new_tokens=10, temperature=0.1, do_sample=False)
-                input_len = inputs['input_ids'].shape[1]
-                return predict_tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True).strip()
-            except Exception as e: logging.error(f"Error in _local_predict_func: {e}"); return "Prediction error."
+        #def _local_predict_func(prompt: str) -> str:
+        #    if predict_model is None or predict_tokenizer is None: return "Error: Predictor not loaded."
+        #    if tdc_prompts is None: return "Error: TDC prompts not loaded."
+        #    try:
+        #        inputs = predict_tokenizer(prompt, return_tensors="pt").to(predict_model.device)
+        #        outputs = predict_model.generate(**inputs, max_new_tokens=10, temperature=0.1, do_sample=False)
+        #        input_len = inputs['input_ids'].shape[1]
+        #        return predict_tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True).strip()
+        #    except Exception as e: logging.error(f"Error in _local_predict_func: {e}"); return "Prediction error."
+
+        def _api_predict_func(prompt_for_txgemma: str) -> str:
+            """
+            Эта функция будет передана в инструменты.
+            Она вызывает Gradio Client.
+            """
+            logging.debug(f"Calling _api_predict_func with Gradio client for prompt: {prompt_for_txgemma[:50]}...")
+            
+            # Параметры для Gradio API (можно вынести в config, если нужно)
+            max_tokens = 100 
+            temp = 0.7
+
+            api_response_str = predict_with_gradio_client(
+                prompt_text=prompt_for_txgemma,
+                max_new_tokens_val=max_tokens,
+                temperature_val=temp
+            )
+
+            if api_response_str is not None:
+                return api_response_str 
+            else:
+                logging.error(f"Gradio client call failed for prompt: {prompt_for_txgemma[:100]}...")
+                return "Error: Prediction API call failed or returned None." # Важно вернуть строку ошибки
+
 
         # --- 4. Initialize Tools ---
         logging.info("Initializing tools...")
@@ -92,13 +117,13 @@ def run_hypothesis_pipeline(
         except Exception as e: logging.error(f"Failed to create PubMedSearch: {e}")
         # ClinTox
         try:
-            tool = ClinicalTox(_local_predict_func, tdc_prompts)
+            tool = ClinicalTox(_api_predict_func, tdc_prompts)
             active_tools.append(tool); logging.info(f"'{tool.tool_call_name}' tool created.")
         except KeyError as ke: logging.warning(f"ClinicalTox not created: Template '{ke}' not found.")
         except Exception as e: logging.error(f"Failed to create ClinicalTox: {e}")
         # BBB
         try:
-            tool = BBBPredictTool(_local_predict_func, tdc_prompts)
+            tool = BBBPredictTool(_api_predict_func, tdc_prompts)
             active_tools.append(tool); logging.info(f"'{tool.tool_call_name}' tool created.")
         except KeyError as ke: logging.warning(f"BBBPredictTool not created: Template '{ke}' not found.")
         except Exception as e: logging.error(f"Failed to create BBBPredictTool: {e}")
